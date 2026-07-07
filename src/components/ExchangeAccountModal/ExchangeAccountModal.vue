@@ -94,6 +94,15 @@
             <a-icon type="arrow-right" />
           </a-button>
         </div>
+        <a-form-item :label="$t('profile.exchange.demoTrading')">
+          <a-switch
+            v-decorator="['enable_demo_trading', { valuePropName: 'checked', initialValue: false }]"
+          />
+          <div class="field-hint">
+            <a-icon type="info-circle" />
+            <span>{{ $t('profile.exchange.demoTradingHint') }}</span>
+          </div>
+        </a-form-item>
         <a-form-item :label="$t('profile.exchange.apiKey')">
           <a-input-password
             v-decorator="['api_key', { rules: [{ required: true, message: 'API Key is required' }] }]"
@@ -310,7 +319,7 @@ export default {
       // passes back the fields listed here — omitting name caused empty DB names).
       const f = ['exchange_id', 'name']
       if (this.addExchangeType === 'crypto') {
-        f.push('api_key', 'secret_key')
+        f.push('enable_demo_trading', 'api_key', 'secret_key')
         if (this.addExchangeNeedsPassphrase) f.push('passphrase')
       } else if (this.addExchangeType === 'alpaca') {
         f.push('api_key', 'secret_key', 'base_url')
@@ -321,7 +330,7 @@ export default {
     },
     _validateFieldNamesForTest () {
       if (this.addExchangeType === 'crypto') {
-        const f = ['exchange_id', 'api_key', 'secret_key']
+        const f = ['exchange_id', 'enable_demo_trading', 'api_key', 'secret_key']
         if (this.addExchangeNeedsPassphrase) f.push('passphrase')
         return f
       }
@@ -337,6 +346,9 @@ export default {
       const p = { ...values }
       if (typeof p.name === 'string') {
         p.name = p.name.trim()
+      }
+      if (this.addExchangeType === 'crypto') {
+        p.enable_demo_trading = Boolean(p.enable_demo_trading)
       }
       if (p.exchange_id === 'alpaca') {
         if (typeof p.base_url === 'string') p.base_url = p.base_url.trim()
