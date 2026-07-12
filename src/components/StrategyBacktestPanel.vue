@@ -307,6 +307,66 @@
 
       </div>
 
+          <div
+            v-if="qualityChecks.length"
+            class="bt-quality-checks"
+            :class="{ 'is-collapsed': !qualityChecksExpanded }"
+          >
+
+          <div
+            class="bt-quality-checks__head"
+            role="button"
+            tabindex="0"
+            :aria-expanded="String(qualityChecksExpanded)"
+            @click="toggleQualityChecks"
+            @keydown.enter="toggleQualityChecks"
+            @keydown.space.prevent="toggleQualityChecks"
+          >
+
+            <span class="bt-quality-checks__title">
+              <a-icon type="audit" /> 回测检查清单
+              <a-icon :type="qualityChecksExpanded ? 'up' : 'down'" class="bt-quality-checks__toggle-icon" />
+            </span>
+
+          <div class="bt-quality-checks__summary">
+
+              <span v-if="qualityCheckCounts.FAIL" class="bt-quality-checks__summary-chip is-fail">FAIL <strong>{{ qualityCheckCounts.FAIL }}</strong></span>
+
+              <span v-if="qualityCheckCounts.WARN" class="bt-quality-checks__summary-chip is-warn">WARN <strong>{{ qualityCheckCounts.WARN }}</strong></span>
+
+              <span class="bt-quality-checks__summary-chip is-pass">PASS <strong>{{ qualityCheckCounts.PASS }}</strong></span>
+
+          </div>
+
+        </div>
+
+          <div v-show="qualityChecksExpanded" class="bt-quality-checks__list">
+
+          <div
+            v-for="item in qualityChecks"
+            :key="item.id || item.title"
+            class="bt-quality-check"
+            :class="qualityCheckTone(item)"
+          >
+
+            <a-tag :color="qualityCheckColor(item)">{{ item.status || '-' }}</a-tag>
+
+            <div class="bt-quality-check__body">
+
+              <strong>{{ item.title }}</strong>
+
+              <p>{{ item.detail }}</p>
+
+              <small>{{ item.recommendation }}</small>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
       <div class="bt-analysis-grid">
 
         <div class="bt-chart-card bt-chart-card--wide">
@@ -689,9 +749,9 @@ export default {
 
       selectedTuneId: '',
 
-      tuningProgress: { done: 0, total: 0 }
-
-    }
+        tuningProgress: { done: 0, total: 0 },
+        qualityChecksExpanded: true
+      }
 
   },
 
@@ -798,6 +858,24 @@ export default {
     resultTrades () {
 
       return (this.result && Array.isArray(this.result.trades)) ? this.result.trades : []
+
+    },
+
+    qualityChecks () {
+
+      return (this.result && Array.isArray(this.result.qualityChecks)) ? this.result.qualityChecks : []
+
+    },
+
+    qualityCheckCounts () {
+
+      return this.qualityChecks.reduce((acc, item) => {
+        const status = String(item && item.status ? item.status : '').toUpperCase()
+        if (status === 'FAIL' || status === 'WARN' || status === 'PASS') {
+          acc[status] += 1
+        }
+        return acc
+      }, { FAIL: 0, WARN: 0, PASS: 0 })
 
     },
 
@@ -2410,6 +2488,40 @@ export default {
 
     },
 
+    qualityCheckTone (item) {
+
+      const status = String(item && item.status ? item.status : '').toUpperCase()
+
+      if (status === 'FAIL') return 'is-fail'
+
+      if (status === 'WARN') return 'is-warn'
+
+      if (status === 'PASS') return 'is-pass'
+
+      return ''
+
+    },
+
+    qualityCheckColor (item) {
+
+      const status = String(item && item.status ? item.status : '').toUpperCase()
+
+      if (status === 'FAIL') return 'red'
+
+      if (status === 'WARN') return 'orange'
+
+      if (status === 'PASS') return 'green'
+
+      return 'blue'
+
+    },
+
+    toggleQualityChecks () {
+
+      this.qualityChecksExpanded = !this.qualityChecksExpanded
+
+    },
+
     hasBacktestHistory () {
 
       return (this.history || []).length > 0
@@ -3015,6 +3127,217 @@ export default {
       background: var(--primary-color-soft, rgba(24, 144, 255, 0.08));
 
       border: 1px solid var(--primary-color-ring, rgba(24, 144, 255, 0.18));
+
+    }
+
+  }
+
+  .bt-quality-checks {
+
+      padding: 10px 12px;
+
+    margin-bottom: 14px;
+
+      border: 1px solid rgba(15, 23, 42, 0.08);
+
+      border-radius: 8px;
+
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+
+  }
+
+  .bt-quality-checks__head {
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 12px;
+
+      min-height: 28px;
+
+      font-size: 12px;
+
+    font-weight: 700;
+
+      color: #475569;
+
+    cursor: pointer;
+
+    &:focus-visible {
+      outline: 2px solid rgba(24, 144, 255, 0.45);
+      outline-offset: 2px;
+    }
+
+  }
+
+    .bt-quality-checks__title {
+
+      display: inline-flex;
+
+      align-items: center;
+
+      gap: 6px;
+
+    }
+
+    .bt-quality-checks__toggle-icon {
+
+      font-size: 11px;
+
+      color: #94a3b8;
+
+    }
+
+  .bt-quality-checks__summary {
+
+    display: flex;
+
+    flex-wrap: wrap;
+
+      gap: 6px;
+
+  }
+
+    .bt-quality-checks__summary-chip {
+
+      display: inline-flex;
+
+      align-items: center;
+
+      gap: 6px;
+
+      min-height: 28px;
+
+      padding: 5px 9px;
+
+      border-radius: 999px;
+
+      border: 1px solid rgba(100, 116, 139, 0.18);
+
+      background: #fff;
+
+      color: #475569;
+
+      font-size: 11px;
+
+      line-height: 1.2;
+
+      strong {
+
+        color: #0f172a;
+
+        font-variant-numeric: tabular-nums;
+
+      }
+
+      &.is-pass {
+
+        border-color: rgba(22, 163, 74, 0.22);
+
+        background: rgba(22, 163, 74, 0.08);
+
+        color: #15803d;
+
+        strong { color: #15803d; }
+
+      }
+
+      &.is-warn {
+
+        border-color: rgba(217, 119, 6, 0.24);
+
+        background: rgba(217, 119, 6, 0.09);
+
+        color: #b45309;
+
+        strong { color: #b45309; }
+
+      }
+
+      &.is-fail {
+
+        border-color: rgba(220, 38, 38, 0.22);
+
+        background: rgba(220, 38, 38, 0.08);
+
+        color: #b91c1c;
+
+        strong { color: #b91c1c; }
+
+      }
+
+    }
+
+    .bt-quality-checks:not(.is-collapsed) .bt-quality-checks__head {
+
+      margin-bottom: 8px;
+
+    }
+
+  .bt-quality-checks__list {
+
+    display: grid;
+
+      gap: 6px;
+
+  }
+
+  .bt-quality-check {
+
+    display: flex;
+
+    align-items: flex-start;
+
+    gap: 8px;
+
+      padding: 8px 10px;
+
+    border-radius: 8px;
+
+      border: 1px solid rgba(100, 116, 139, 0.16);
+
+    background: #fff;
+
+      &.is-pass { border-left: 3px solid rgba(22, 163, 74, 0.42); }
+
+      &.is-warn { border-left: 3px solid rgba(217, 119, 6, 0.48); background: rgba(217, 119, 6, 0.04); }
+
+      &.is-fail { border-left: 3px solid rgba(220, 38, 38, 0.45); background: rgba(220, 38, 38, 0.04); }
+
+  }
+
+  .bt-quality-check__body {
+
+    min-width: 0;
+
+    strong {
+
+      display: block;
+
+      margin-bottom: 2px;
+
+      color: #1e293b;
+
+    }
+
+    p {
+
+      margin: 0 0 2px;
+
+      color: #475569;
+
+      font-size: 12px;
+
+    }
+
+    small {
+
+      color: #64748b;
+
+      font-size: 12px;
 
     }
 

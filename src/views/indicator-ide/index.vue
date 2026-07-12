@@ -785,6 +785,47 @@
                                 </span>
                               </div>
 
+                              <div
+                                v-if="backtestQualityChecks.length"
+                                class="backtest-checklist"
+                                :class="{ 'is-collapsed': !backtestQualityChecksExpanded }"
+                              >
+                                <div
+                                  class="backtest-checklist__head"
+                                  role="button"
+                                  tabindex="0"
+                                  :aria-expanded="String(backtestQualityChecksExpanded)"
+                                  @click="toggleBacktestQualityChecks"
+                                  @keydown.enter="toggleBacktestQualityChecks"
+                                  @keydown.space.prevent="toggleBacktestQualityChecks"
+                                >
+                                  <span class="backtest-checklist__title">
+                                    <a-icon type="audit" /> 回测检查清单
+                                    <a-icon :type="backtestQualityChecksExpanded ? 'up' : 'down'" class="backtest-checklist__toggle-icon" />
+                                  </span>
+                                  <div class="backtest-checklist__summary">
+                                    <span v-if="backtestQualityCheckCounts.FAIL" class="backtest-quality-chip backtest-quality-chip--danger">FAIL <strong>{{ backtestQualityCheckCounts.FAIL }}</strong></span>
+                                    <span v-if="backtestQualityCheckCounts.WARN" class="backtest-quality-chip backtest-quality-chip--warn">WARN <strong>{{ backtestQualityCheckCounts.WARN }}</strong></span>
+                                    <span class="backtest-quality-chip backtest-quality-chip--good">PASS <strong>{{ backtestQualityCheckCounts.PASS }}</strong></span>
+                                  </div>
+                                </div>
+                                <div v-show="backtestQualityChecksExpanded" class="backtest-checklist__list">
+                                  <div
+                                    v-for="item in backtestQualityChecks"
+                                    :key="item.id || item.title"
+                                    class="backtest-checklist__item"
+                                    :class="'is-' + String(item.status || '').toLowerCase()"
+                                  >
+                                    <a-tag :color="backtestQualityCheckColor(item)">{{ item.status || '-' }}</a-tag>
+                                    <div class="backtest-checklist__body">
+                                      <strong>{{ item.title }}</strong>
+                                      <p>{{ item.detail }}</p>
+                                      <small>{{ item.recommendation }}</small>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
                               <div class="eq-section eq-section--hero">
                                 <div class="eq-title">
                                   <a-icon type="area-chart" style="margin-right: 6px;" />
@@ -1635,6 +1676,7 @@ export default {
       purchasedMarketHintDismissed: false,
 
       strategyDirectivesAlertDismissed: false,
+      backtestQualityChecksExpanded: true,
 
       ideWorkspaceTab: 'chart',
 
@@ -2346,6 +2388,19 @@ export default {
           desc: sharpe >= 1 ? this.$t('indicatorIde.diagnosticSharpeGood') : sharpe >= 0.4 ? this.$t('indicatorIde.diagnosticSharpeWarn') : this.$t('indicatorIde.diagnosticSharpeDanger')
         }
       ]
+    },
+    backtestQualityChecks () {
+      const checks = (this.result && this.result.qualityChecks) || []
+      return Array.isArray(checks) ? checks : []
+    },
+    backtestQualityCheckCounts () {
+      return this.backtestQualityChecks.reduce((acc, item) => {
+        const status = String(item && item.status ? item.status : '').toUpperCase()
+        if (status === 'FAIL' || status === 'WARN' || status === 'PASS') {
+          acc[status] += 1
+        }
+        return acc
+      }, { FAIL: 0, WARN: 0, PASS: 0 })
     },
     tradePnlSummary () {
       const trades = Array.isArray((this.result || {}).trades) ? this.result.trades : []
@@ -6322,6 +6377,16 @@ export default {
       if (ty === 'close_long' || ty === 'close_short' || ty === 'sell' || ty === 'buy') return 'geekblue'
       return 'default'
     },
+    backtestQualityCheckColor (item) {
+      const status = String(item && item.status ? item.status : '').toUpperCase()
+      if (status === 'FAIL') return 'red'
+      if (status === 'WARN') return 'orange'
+      if (status === 'PASS') return 'green'
+      return 'blue'
+    },
+    toggleBacktestQualityChecks () {
+      this.backtestQualityChecksExpanded = !this.backtestQualityChecksExpanded
+    },
 
     // ===== Format helpers =====
     fmtPct (v) {
@@ -8181,6 +8246,77 @@ body.realdark .backtest-panel-toolbar {
   border-color: rgba(100, 116, 139, 0.18);
   background: rgba(100, 116, 139, 0.08);
   color: #64748b;
+}
+.backtest-checklist {
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+.backtest-checklist__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+  cursor: pointer;
+  &:focus-visible {
+    outline: 2px solid rgba(24, 144, 255, 0.45);
+    outline-offset: 2px;
+  }
+}
+.backtest-checklist__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.backtest-checklist__toggle-icon {
+  font-size: 11px;
+  color: #94a3b8;
+}
+.backtest-checklist__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.backtest-checklist:not(.is-collapsed) .backtest-checklist__head {
+  margin-bottom: 8px;
+}
+.backtest-checklist__list {
+  display: grid;
+  gap: 6px;
+}
+.backtest-checklist__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  background: #fff;
+  &.is-pass { border-left: 3px solid rgba(22, 163, 74, 0.42); }
+  &.is-warn { border-left: 3px solid rgba(217, 119, 6, 0.48); background: rgba(217, 119, 6, 0.04); }
+  &.is-fail { border-left: 3px solid rgba(220, 38, 38, 0.45); background: rgba(220, 38, 38, 0.04); }
+}
+.backtest-checklist__body {
+  min-width: 0;
+  strong {
+    display: block;
+    margin-bottom: 2px;
+    color: #1e293b;
+  }
+  p {
+    margin: 0 0 2px;
+    color: #475569;
+    font-size: 12px;
+  }
+  small {
+    color: #64748b;
+    font-size: 12px;
+  }
 }
 .backtest-result-tabs {
   margin-top: 2px;
