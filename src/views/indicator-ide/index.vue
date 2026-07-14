@@ -828,11 +828,34 @@
 
                               <div class="eq-section eq-section--hero">
                                 <div class="eq-title">
-                                  <a-icon type="area-chart" style="margin-right: 6px;" />
-                                  {{ $t('indicatorIde.equityCurve') }}
+                                  <span>
+                                    <a-icon type="area-chart" style="margin-right: 6px;" />
+                                    {{ $t('indicatorIde.equityCurve') }}
+                                  </span>
+                                  <a-button
+                                    v-if="result && result.equityCurve && result.equityCurve.length"
+                                    size="small"
+                                    type="link"
+                                    icon="fullscreen"
+                                    @click="openEquityZoom"
+                                  >放大</a-button>
                                 </div>
                                 <div ref="eqChart" class="equity-chart equity-chart--large"></div>
                               </div>
+
+                              <a-modal
+                                v-if="equityZoomVisible"
+                                :visible="equityZoomVisible"
+                                :footer="null"
+                                width="1040px"
+                                centered
+                                @cancel="closeEquityZoom"
+                              >
+                                <template slot="title">
+                                  <span><a-icon type="area-chart" /> {{ $t('indicatorIde.equityCurve') }}</span>
+                                </template>
+                                <div ref="eqChartZoom" class="equity-chart equity-chart--zoom"></div>
+                              </a-modal>
 
                               <div class="trades-section trades-section--workbench">
                                 <div class="trades-title">
@@ -1677,6 +1700,7 @@ export default {
 
       strategyDirectivesAlertDismissed: false,
       backtestQualityChecksExpanded: true,
+      equityZoomVisible: false,
 
       ideWorkspaceTab: 'chart',
 
@@ -1795,6 +1819,7 @@ export default {
       ideAddMarketKeys: [],
 
       eqChartInstance: null,
+      eqChartZoomInstance: null,
       elapsedSec: 0,
       elapsedTimer: null,
       experimentScatterInstance: null,
@@ -2547,6 +2572,10 @@ export default {
     if (this.eqChartInstance) {
       this.eqChartInstance.dispose()
       this.eqChartInstance = null
+    }
+    if (this.eqChartZoomInstance) {
+      this.eqChartZoomInstance.dispose()
+      this.eqChartZoomInstance = null
     }
     this.disposeExperimentCharts()
     clearInterval(this.elapsedTimer)
@@ -5438,7 +5467,36 @@ export default {
           borderColor: dk ? '#434343' : '#ddd',
           textStyle: { color: dk ? 'rgba(255,255,255,0.85)' : '#333', fontSize: 12 }
         },
-        grid: { left: 60, right: 20, top: showBenchmark ? 34 : 15, bottom: 25 },
+        grid: { left: 60, right: 20, top: showBenchmark ? 34 : 15, bottom: 58 },
+        toolbox: {
+          top: showBenchmark ? 28 : 8,
+          right: 8,
+          feature: {
+            restore: { title: 'Reset' }
+          },
+          iconStyle: { borderColor: dk ? 'rgba(255,255,255,0.55)' : '#64748b' }
+        },
+        dataZoom: [
+          {
+            type: 'inside',
+            xAxisIndex: 0,
+            filterMode: 'none',
+            zoomOnMouseWheel: true,
+            moveOnMouseMove: true,
+            moveOnMouseWheel: false
+          },
+          {
+            type: 'slider',
+            xAxisIndex: 0,
+            filterMode: 'none',
+            height: 18,
+            bottom: 14,
+            borderColor: dk ? 'rgba(255,255,255,0.12)' : '#d9e2ec',
+            fillerColor: dk ? 'rgba(24,144,255,0.22)' : 'rgba(24,144,255,0.12)',
+            handleStyle: { color: dk ? '#334155' : '#fff', borderColor: themeAccent },
+            textStyle: { color: dk ? 'rgba(255,255,255,0.45)' : '#64748b' }
+          }
+        ],
         xAxis: {
           type: 'category',
           data: data.map(d => d.time || ''),
@@ -5487,7 +5545,10 @@ export default {
 : [])
         ]
       })
-      this._onResize = () => { if (this.eqChartInstance) this.eqChartInstance.resize() }
+      this._onResize = () => {
+        if (this.eqChartInstance) this.eqChartInstance.resize()
+        if (this.eqChartZoomInstance) this.eqChartZoomInstance.resize()
+      }
       window.addEventListener('resize', this._onResize)
     },
 
@@ -6386,6 +6447,33 @@ export default {
     },
     toggleBacktestQualityChecks () {
       this.backtestQualityChecksExpanded = !this.backtestQualityChecksExpanded
+    },
+
+    openEquityZoom () {
+      this.equityZoomVisible = true
+      this.$nextTick(() => this.renderEquityChartZoom())
+    },
+
+    closeEquityZoom () {
+      this.equityZoomVisible = false
+      if (this.eqChartZoomInstance) {
+        this.eqChartZoomInstance.dispose()
+        this.eqChartZoomInstance = null
+      }
+    },
+
+    renderEquityChartZoom () {
+      const dom = this.$refs.eqChartZoom
+      if (!dom) return
+      if (!this.eqChartInstance) this.renderEquityChart()
+      const option = this.eqChartInstance && this.eqChartInstance.getOption
+        ? this.eqChartInstance.getOption()
+        : null
+      if (!option) return
+      if (this.eqChartZoomInstance) this.eqChartZoomInstance.dispose()
+      this.eqChartZoomInstance = echarts.init(dom)
+      this.eqChartZoomInstance.setOption(option)
+      this.eqChartZoomInstance.resize()
     },
 
     // ===== Format helpers =====
@@ -8578,10 +8666,13 @@ body.realdark .backtest-panel-toolbar {
   border: 1.5px dashed #00e676;
 }
 .eq-title, .trades-title {
-  font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px; display: flex; align-items: center;
+  font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  > span { display: inline-flex; align-items: center; min-width: 0; }
+  .ant-btn { height: auto; padding: 0; font-size: 12px; font-weight: 600; }
   .trades-count { font-weight: 400; font-size: 12px; color: #999; margin-left: 4px; }
 }
 .equity-chart { width: 100%; height: 200px; border-radius: 8px; }
+.equity-chart--zoom { height: 560px; }
 
 .ide-tuning-launch {
   padding: 0;

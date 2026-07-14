@@ -375,7 +375,19 @@
 
             <span><a-icon type="area-chart" /> {{ $t('strategyCenter.backtest.equityCurve') }}</span>
 
-            <small>{{ resultDateRange }}</small>
+            <div class="bt-chart-card__actions">
+
+              <small>{{ resultDateRange }}</small>
+
+              <a-button
+                v-if="equityChartPoints.length > 1"
+                size="small"
+                type="link"
+                icon="fullscreen"
+                @click="openEquityZoom"
+              >放大</a-button>
+
+            </div>
 
           </div>
 
@@ -522,6 +534,69 @@
         </a-table>
 
       </div>
+
+      <a-modal
+        v-if="equityZoomVisible"
+        :visible="equityZoomVisible"
+        :footer="null"
+        width="960px"
+        centered
+        @cancel="closeEquityZoom"
+      >
+
+        <template slot="title">
+          <span><a-icon type="area-chart" /> {{ $t('strategyCenter.backtest.equityCurve') }}</span>
+        </template>
+
+        <div class="bt-chart-legend bt-chart-legend--modal">
+
+          <span><i :style="{ background: equityToneColor }"></i>{{ $t('strategyCenter.backtest.strategyEquity') }}</span>
+
+          <span v-if="benchmarkChartPoints.length"><i class="benchmark"></i>{{ $t('strategyCenter.backtest.spotBenchmark') }}</span>
+
+          <strong v-if="result && result.alphaReturn != null" :class="Number(result.alphaReturn) >= 0 ? 'profit' : 'loss'">
+            {{ $t('strategyCenter.backtest.alphaReturn') }} {{ fmtPct(result.alphaReturn) }}
+          </strong>
+
+        </div>
+
+        <div class="bt-equity-chart bt-equity-chart--zoom">
+
+          <svg viewBox="0 0 640 220" preserveAspectRatio="none" role="img">
+
+            <defs>
+
+              <linearGradient :id="equityZoomGradientId" x1="0" y1="0" x2="0" y2="1">
+
+                <stop offset="0%" :stop-color="equityToneColor" stop-opacity="0.32" />
+
+                <stop offset="100%" :stop-color="equityToneColor" stop-opacity="0.02" />
+
+              </linearGradient>
+
+            </defs>
+
+            <g class="bt-chart-grid">
+
+              <line v-for="tick in equityTicks" :key="tick" x1="0" x2="640" :y1="tick" :y2="tick" />
+
+            </g>
+
+            <path class="bt-equity-area" :d="equityAreaPath" :fill="`url(#${equityZoomGradientId})`" />
+
+            <polyline
+              v-if="benchmarkPolyline"
+              class="bt-benchmark-line"
+              :points="benchmarkPolyline"
+            />
+
+            <polyline class="bt-equity-line" :points="equityPolyline" :stroke="equityToneColor" />
+
+          </svg>
+
+        </div>
+
+      </a-modal>
 
     </div>
 
@@ -750,7 +825,8 @@ export default {
       selectedTuneId: '',
 
         tuningProgress: { done: 0, total: 0 },
-        qualityChecksExpanded: true
+        qualityChecksExpanded: true,
+        equityZoomVisible: false
       }
 
   },
@@ -955,6 +1031,12 @@ export default {
     equityGradientId () {
 
       return `bt-equity-gradient-${this._uid}`
+
+    },
+
+    equityZoomGradientId () {
+
+      return `bt-equity-zoom-gradient-${this._uid}`
 
     },
 
@@ -2522,6 +2604,18 @@ export default {
 
     },
 
+    openEquityZoom () {
+
+      this.equityZoomVisible = true
+
+    },
+
+    closeEquityZoom () {
+
+      this.equityZoomVisible = false
+
+    },
+
     hasBacktestHistory () {
 
       return (this.history || []).length > 0
@@ -3422,6 +3516,30 @@ export default {
 
   }
 
+  .bt-chart-card__actions {
+
+    display: inline-flex;
+
+    align-items: center;
+
+    gap: 8px;
+
+    flex-shrink: 0;
+
+    .ant-btn {
+
+      padding: 0;
+
+      height: auto;
+
+      font-size: 12px;
+
+      font-weight: 600;
+
+    }
+
+  }
+
   .bt-chart-legend {
 
     display: flex;
@@ -3484,6 +3602,12 @@ export default {
 
   }
 
+  .bt-chart-legend--modal {
+
+    margin-top: 0;
+
+  }
+
   .bt-equity-chart {
 
     height: 180px;
@@ -3503,6 +3627,12 @@ export default {
       display: block;
 
     }
+
+  }
+
+  .bt-equity-chart--zoom {
+
+    height: 520px;
 
   }
 
@@ -4078,6 +4208,12 @@ export default {
     ::v-deep .anticon { color: var(--primary-color, #1890ff); }
 
     small { color: rgba(255, 255, 255, 0.38); }
+
+  }
+
+  .bt-chart-card__actions .ant-btn {
+
+    color: rgba(255, 255, 255, 0.72);
 
   }
 
