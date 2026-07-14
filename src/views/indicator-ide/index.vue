@@ -847,14 +847,112 @@
                                 v-if="equityZoomVisible"
                                 :visible="equityZoomVisible"
                                 :footer="null"
-                                width="1040px"
-                                centered
+                                :closable="false"
+                                width="100vw"
+                                wrap-class-name="backtest-review-modal"
+                                :body-style="{ padding: 0 }"
                                 @cancel="closeEquityZoom"
                               >
-                                <template slot="title">
-                                  <span><a-icon type="area-chart" /> {{ $t('indicatorIde.equityCurve') }}</span>
-                                </template>
-                                <div ref="eqChartZoom" class="equity-chart equity-chart--zoom"></div>
+                                <div class="backtest-review">
+                                  <div class="backtest-review__toolbar">
+                                    <div>
+                                      <div class="backtest-review__kicker">{{ symbol }} / {{ timeframe }}</div>
+                                      <div class="backtest-review__title">
+                                        <a-icon type="fullscreen" />
+                                        回测复盘
+                                      </div>
+                                    </div>
+                                    <div class="backtest-review__actions">
+                                      <a-tag color="blue">K 线 + 资金曲线</a-tag>
+                                      <a-button icon="close" @click="closeEquityZoom">关闭</a-button>
+                                    </div>
+                                  </div>
+                                  <div
+                                    class="backtest-review__content"
+                                    :class="{ 'is-trades-collapsed': !reviewTradesExpanded }"
+                                  >
+                                    <div class="backtest-review__price-pane">
+                                      <kline-chart
+                                        ref="reviewKlineChart"
+                                        :symbol="symbol"
+                                        :market="market"
+                                        :timeframe="timeframe"
+                                        :theme="chartTheme"
+                                        :activeIndicators="activeIndicators"
+                                        :userId="userId"
+                                        :realtime-enabled="false"
+                                        :review-equity-curve="result && result.equityCurve ? result.equityCurve : []"
+                                        :review-benchmark-curve="result && result.benchmarkCurve ? result.benchmarkCurve : []"
+                                        :review-time-range="reviewKlineTimeRange"
+                                        :review-hide-indicator-signals="true"
+                                        @load="onReviewKlineLoaded"
+                                      />
+                                    </div>
+                                    <div
+                                      class="backtest-review__trades"
+                                      :class="{ 'is-collapsed': !reviewTradesExpanded }"
+                                    >
+                                      <div class="trades-title">
+                                        <a-icon type="swap" style="margin-right: 6px;" />
+                                        交易记录
+                                        <span class="trades-count">({{ pairedTrades.length }})</span>
+                                        <span class="backtest-review__trades-hint">点击记录定位到对应 K 线</span>
+                                        <a-button
+                                          class="backtest-review__trades-toggle"
+                                          size="small"
+                                          type="link"
+                                          @click="toggleReviewTrades"
+                                        >
+                                          {{ reviewTradesExpanded ? '收起' : '展开' }}
+                                        </a-button>
+                                      </div>
+                                      <div v-show="reviewTradesExpanded" class="backtest-review__trades-scroll">
+                                        <div class="review-trades-table" :style="reviewTradeTableStyle">
+                                          <div class="review-trades-table__header" :style="reviewTradeGridStyle">
+                                            <div
+                                              v-for="col in reviewTradeColumns"
+                                              :key="col.key"
+                                              class="review-trades-table__cell review-trades-table__cell--header"
+                                            >
+                                              {{ col.title }}
+                                              <span
+                                                class="review-trades-table__resize-handle"
+                                                @mousedown.stop.prevent="startReviewTradeColumnResize($event, col)"
+                                              ></span>
+                                            </div>
+                                          </div>
+                                          <div class="review-trades-table__body">
+                                            <div
+                                              v-for="trade in pairedTrades"
+                                              :key="trade.id"
+                                              class="review-trades-table__row"
+                                              :class="reviewTradeRowClassName(trade)"
+                                              :style="reviewTradeGridStyle"
+                                              @click="locateReviewTrade(trade)"
+                                            >
+                                              <div
+                                                v-for="col in reviewTradeColumns"
+                                                :key="col.key"
+                                                class="review-trades-table__cell"
+                                              >
+                                                <template v-if="col.key === 'type'">
+                                                  <a-tag :color="trade.type === 'long' ? 'green' : 'red'" style="margin: 0;">{{ trade.type.toUpperCase() }}</a-tag>
+                                                </template>
+                                                <template v-else-if="col.key === 'exitTag'">
+                                                  <a-tag :color="exitTagColor(trade)" style="margin: 0;">{{ exitTagLabel(trade) }}</a-tag>
+                                                </template>
+                                                <template v-else-if="col.key === 'profit'">
+                                                  <span :class="trade.profit >= 0 ? 'positive' : 'negative'">{{ fmtMoney(trade.profit) }}</span>
+                                                </template>
+                                                <template v-else>{{ reviewTradeCellValue(trade, col.key) }}</template>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
                               </a-modal>
 
                               <div class="trades-section trades-section--workbench">
@@ -1701,6 +1799,10 @@ export default {
       strategyDirectivesAlertDismissed: false,
       backtestQualityChecksExpanded: true,
       equityZoomVisible: false,
+      selectedReviewTradeId: null,
+      reviewTradesExpanded: false,
+      reviewTradeColumnWidths: {},
+      reviewTradeColumnResize: null,
 
       ideWorkspaceTab: 'chart',
 
@@ -1819,7 +1921,6 @@ export default {
       ideAddMarketKeys: [],
 
       eqChartInstance: null,
-      eqChartZoomInstance: null,
       elapsedSec: 0,
       elapsedTimer: null,
       experimentScatterInstance: null,
@@ -1853,6 +1954,14 @@ export default {
     },
     chartTheme () {
       return this.isDarkTheme ? 'dark' : 'light'
+    },
+    reviewKlineTimeRange () {
+      const equity = (this.result && this.result.equityCurve) || []
+      if (!equity.length) return null
+      return {
+        start: equity[0] && equity[0].time,
+        end: equity[equity.length - 1] && equity[equity.length - 1].time
+      }
     },
     strategyDirectivesSummary () {
       const raw = this.parseStrategyAnnotationRaw(this.currentCode || '')
@@ -2516,6 +2625,35 @@ export default {
         .sort((a, b) => (b.exitTs || b.entryTs || 0) - (a.exitTs || a.entryTs || 0))
         .map((item, index) => ({ ...item, id: pairs.length - index }))
     },
+    reviewTradeColumns () {
+      return [
+        { key: 'id', title: '#', min: 48, max: 86 },
+        { key: 'type', title: this.$t('indicatorIde.type'), min: 92, max: 120 },
+        { key: 'exitTag', title: this.$t('indicatorIde.exitTag'), min: 100, max: 150 },
+        { key: 'profit', title: this.$t('indicatorIde.profit'), min: 110, max: 170 },
+        { key: 'entryPrice', title: this.$t('indicatorIde.entryPrice'), min: 108, max: 180 },
+        { key: 'exitPrice', title: this.$t('indicatorIde.exitPrice'), min: 108, max: 180 },
+        { key: 'entryDate', title: this.$t('indicatorIde.entry'), min: 156, max: 220 },
+        { key: 'exitDate', title: this.$t('indicatorIde.exit'), min: 156, max: 220 },
+        { key: 'balance', title: this.$t('indicatorIde.balance'), min: 120, max: 190 }
+      ]
+    },
+    reviewTradeGridStyle () {
+      const lastIndex = this.reviewTradeColumns.length - 1
+      return {
+        gridTemplateColumns: this.reviewTradeColumns.map((col, index) => {
+          const width = this.reviewTradeColumnWidth(col)
+          return index === lastIndex ? `minmax(${width}px, 1fr)` : `${width}px`
+        }).join(' ')
+      }
+    },
+    reviewTradeTableStyle () {
+      const width = this.reviewTradeColumns.reduce((sum, col) => sum + this.reviewTradeColumnWidth(col), 0)
+      return {
+        width: '100%',
+        minWidth: `${width}px`
+      }
+    },
     tradeColumns () {
       return [
         { title: '#', dataIndex: 'id', width: 50 },
@@ -2573,10 +2711,6 @@ export default {
       this.eqChartInstance.dispose()
       this.eqChartInstance = null
     }
-    if (this.eqChartZoomInstance) {
-      this.eqChartZoomInstance.dispose()
-      this.eqChartZoomInstance = null
-    }
     this.disposeExperimentCharts()
     clearInterval(this.elapsedTimer)
     clearTimeout(this.addSearchTimer)
@@ -2595,6 +2729,7 @@ export default {
       window.removeEventListener('keydown', this._saveShortcutListener)
       this._saveShortcutListener = null
     }
+    this.stopReviewTradeColumnResize()
     try {
       message.destroy()
       message.config({ getContainer: () => document.body })
@@ -3255,7 +3390,8 @@ export default {
     },
     clearBacktestSignalOverlays (opts = {}) {
       const silent = !!(opts && opts.silent)
-      const chart = this.$refs.klineChart
+      const refName = (opts && opts.refName) || 'klineChart'
+      const chart = this.$refs[refName]
       if (!chart) {
         if (!silent) this.$message.info(this.$t('indicatorIde.clearSignalsNoChart'))
         return
@@ -3297,8 +3433,8 @@ export default {
       this.clearBacktestSignalOverlays({ silent: true })
     },
 
-    getKlineChartInstance () {
-      const chart = this.$refs.klineChart
+    getKlineChartInstance (refName = 'klineChart') {
+      const chart = this.$refs[refName]
       if (!chart) return null
       if (typeof chart.getChartInstance === 'function') return chart.getChartInstance()
       return chart.chartRef || null
@@ -4754,29 +4890,29 @@ export default {
     },
 
     // ===== Render backtest buy/sell signals on K-line chart =====
-    renderBacktestSignals (retry = 0) {
+    renderBacktestSignals (retry = 0, refName = 'klineChart') {
       if (!this.shouldShowBacktestMarkersOnChart()) {
-        this.clearBacktestSignalOverlays({ silent: true })
+        this.clearBacktestSignalOverlays({ silent: true, refName })
         return
       }
       const trades = (this.result && this.result.trades) || []
       if (!trades.length) return
-      const chart = this.$refs.klineChart
+      const chart = this.$refs[refName]
       if (!chart) {
-        if (retry < 8) setTimeout(() => this.renderBacktestSignals(retry + 1), 250)
+        if (retry < 8) setTimeout(() => this.renderBacktestSignals(retry + 1, refName), 250)
         return
       }
-      const chartInstance = this.getKlineChartInstance()
+      const chartInstance = this.getKlineChartInstance(refName)
       if (!chartInstance) {
-        if (retry < 8) setTimeout(() => this.renderBacktestSignals(retry + 1), 250)
+        if (retry < 8) setTimeout(() => this.renderBacktestSignals(retry + 1, refName), 250)
         return
       }
 
-      this.clearBacktestSignalOverlays({ silent: true })
+      this.clearBacktestSignalOverlays({ silent: true, refName })
 
       const klineData = (typeof chartInstance.getDataList === 'function') ? chartInstance.getDataList() : []
       if (!klineData.length && retry < 8) {
-        setTimeout(() => this.renderBacktestSignals(retry + 1), 250)
+        setTimeout(() => this.renderBacktestSignals(retry + 1, refName), 250)
         return
       }
       const klineTimestamps = klineData.map(k => k.timestamp)
@@ -4784,6 +4920,7 @@ export default {
       klineData.forEach(bar => {
         if (bar && bar.timestamp != null) barByTs.set(bar.timestamp, bar)
       })
+      const showSignalBarMarkers = refName !== 'reviewKlineChart'
 
       const parseBackendTime = (raw) => {
         if (raw == null) return 0
@@ -4921,7 +5058,7 @@ export default {
           color: meta.color
         })
 
-        if (signalTs && signalTs !== execTs) {
+        if (showSignalBarMarkers && signalTs && signalTs !== execTs) {
           const sigAnchor = barAnchorPrices(signalTs, isBuy, execPrice, 'dashed')
           createSignalOverlay({
             timestamp: signalTs,
@@ -5505,6 +5642,7 @@ export default {
         },
         yAxis: {
           type: 'value',
+          scale: true,
           axisLabel: {
             color: dk ? 'rgba(255,255,255,0.35)' : '#999',
             fontSize: 11,
@@ -5547,7 +5685,6 @@ export default {
       })
       this._onResize = () => {
         if (this.eqChartInstance) this.eqChartInstance.resize()
-        if (this.eqChartZoomInstance) this.eqChartZoomInstance.resize()
       }
       window.addEventListener('resize', this._onResize)
     },
@@ -6451,29 +6588,229 @@ export default {
 
     openEquityZoom () {
       this.equityZoomVisible = true
-      this.$nextTick(() => this.renderEquityChartZoom())
+      this.selectedReviewTradeId = null
+      this.reviewTradesExpanded = false
+      this.$nextTick(() => {
+        ;[120, 350, 700].forEach(delay => {
+          setTimeout(() => {
+            const chart = this.$refs.reviewKlineChart
+            if (chart && typeof chart.handleResize === 'function') chart.handleResize()
+          }, delay)
+        })
+        setTimeout(() => {
+          const chart = this.$refs.reviewKlineChart
+          if (chart && typeof chart.handleResize === 'function') chart.handleResize()
+          this.renderBacktestSignals(0, 'reviewKlineChart')
+        }, 700)
+      })
     },
 
     closeEquityZoom () {
       this.equityZoomVisible = false
-      if (this.eqChartZoomInstance) {
-        this.eqChartZoomInstance.dispose()
-        this.eqChartZoomInstance = null
+      this.selectedReviewTradeId = null
+      this.reviewTradesExpanded = false
+      this.clearBacktestSignalOverlays({ silent: true, refName: 'reviewKlineChart' })
+    },
+
+    onReviewKlineLoaded () {
+      this.$nextTick(() => {
+        this.renderBacktestSignals(0, 'reviewKlineChart')
+        this.syncReviewKlineToEquityFullRange()
+      })
+    },
+
+    findReviewIndexByTime (items, ts, getTime, preferFloor = true) {
+      const target = Number(ts)
+      if (!Array.isArray(items) || !items.length || !Number.isFinite(target) || target <= 0) return -1
+      let bestIndex = -1
+      let bestDiff = Infinity
+      for (let i = 0; i < items.length; i++) {
+        const itemTs = Number(getTime(items[i]))
+        if (!Number.isFinite(itemTs) || itemTs <= 0) continue
+        if (preferFloor && itemTs <= target) {
+          const diff = target - itemTs
+          if (diff < bestDiff) {
+            bestDiff = diff
+            bestIndex = i
+          }
+        } else if (!preferFloor) {
+          const diff = Math.abs(itemTs - target)
+          if (diff < bestDiff) {
+            bestDiff = diff
+            bestIndex = i
+          }
+        }
+      }
+      if (bestIndex >= 0) return bestIndex
+      return preferFloor ? this.findReviewIndexByTime(items, ts, getTime, false) : -1
+    },
+
+    findReviewKlineIndexByTime (ts) {
+      const chartInstance = this.getKlineChartInstance('reviewKlineChart')
+      const klineData = chartInstance && typeof chartInstance.getDataList === 'function' ? chartInstance.getDataList() : []
+      return this.findReviewIndexByTime(klineData, ts, item => item && item.timestamp, false)
+    },
+
+    findReviewKlineIndexByTradeTime (ts) {
+      const chartInstance = this.getKlineChartInstance('reviewKlineChart')
+      const klineData = chartInstance && typeof chartInstance.getDataList === 'function' ? chartInstance.getDataList() : []
+      return this.findReviewIndexByTime(klineData, ts, item => item && item.timestamp, true)
+    },
+
+    syncReviewKlineToEquityFullRange () {
+      const equity = (this.result && this.result.equityCurve) || []
+      const chart = this.$refs.reviewKlineChart
+      if (!equity.length || !chart || typeof chart.setVisibleRange !== 'function') return
+      const firstTs = this.tradeTimeValue(equity[0] && equity[0].time)
+      const lastTs = this.tradeTimeValue(equity[equity.length - 1] && equity[equity.length - 1].time)
+      const from = this.findReviewKlineIndexByTime(firstTs)
+      const to = this.findReviewKlineIndexByTime(lastTs)
+      if (from < 0 || to < 0) return
+      const start = Math.min(from, to)
+      const end = Math.max(start + 1, Math.max(from, to))
+      chart.setVisibleRange(start, end)
+    },
+
+    reviewTradeRowProps (record) {
+      return {
+        on: {
+          click: () => this.locateReviewTrade(record)
+        }
       }
     },
 
-    renderEquityChartZoom () {
-      const dom = this.$refs.eqChartZoom
-      if (!dom) return
-      if (!this.eqChartInstance) this.renderEquityChart()
-      const option = this.eqChartInstance && this.eqChartInstance.getOption
-        ? this.eqChartInstance.getOption()
-        : null
-      if (!option) return
-      if (this.eqChartZoomInstance) this.eqChartZoomInstance.dispose()
-      this.eqChartZoomInstance = echarts.init(dom)
-      this.eqChartZoomInstance.setOption(option)
-      this.eqChartZoomInstance.resize()
+    reviewTradeRowClassName (record) {
+      return record && record.id === this.selectedReviewTradeId ? 'backtest-review__trade-row--active' : ''
+    },
+
+    toggleReviewTrades () {
+      this.reviewTradesExpanded = !this.reviewTradesExpanded
+      this.$nextTick(() => {
+        const chart = this.$refs.reviewKlineChart
+        if (chart && typeof chart.handleResize === 'function') chart.handleResize()
+      })
+    },
+
+    reviewTradeCellValue (trade, key) {
+      if (!trade) return ''
+      switch (key) {
+        case 'id':
+          return trade.id
+        case 'type':
+          return String(trade.type || '').toUpperCase()
+        case 'exitTag':
+          return this.exitTagLabel(trade)
+        case 'profit':
+          return this.fmtMoney(trade.profit)
+        case 'entryPrice':
+          return this.fmtPrice(trade.entryPrice)
+        case 'exitPrice':
+          return this.fmtPrice(trade.exitPrice)
+        case 'entryDate':
+          return trade.entryDate || ''
+        case 'exitDate':
+          return trade.exitDate || ''
+        case 'balance':
+          return this.fmtMoney(trade.balance)
+        default:
+          return trade[key] == null ? '' : String(trade[key])
+      }
+    },
+
+    measureReviewTradeTextWidth (text) {
+      return String(text == null ? '' : text).split('').reduce((sum, ch) => {
+        return sum + (ch.charCodeAt(0) > 255 ? 13 : 7)
+      }, 0)
+    },
+
+    estimateReviewTradeColumnWidth (col) {
+      const rows = this.pairedTrades || []
+      const samples = [col.title]
+      rows.forEach(trade => samples.push(this.reviewTradeCellValue(trade, col.key)))
+      const contentWidth = samples.reduce((max, value) => Math.max(max, this.measureReviewTradeTextWidth(value)), 0)
+      const padding = col.key === 'type' || col.key === 'exitTag' ? 34 : 28
+      return Math.min(col.max, Math.max(col.min, Math.ceil(contentWidth + padding)))
+    },
+
+    reviewTradeColumnWidth (col) {
+      if (!col) return 0
+      const width = Number(this.reviewTradeColumnWidths[col.key])
+      return Number.isFinite(width) && width > 0 ? width : this.estimateReviewTradeColumnWidth(col)
+    },
+
+    startReviewTradeColumnResize (event, col) {
+      if (!event || !col) return
+      this.stopReviewTradeColumnResize()
+      this.reviewTradeColumnResize = {
+        key: col.key,
+        startX: event.clientX,
+        startWidth: this.reviewTradeColumnWidth(col)
+      }
+      document.body.classList.add('review-trades-resizing')
+      document.addEventListener('mousemove', this.handleReviewTradeColumnResize)
+      document.addEventListener('mouseup', this.stopReviewTradeColumnResize)
+    },
+
+    handleReviewTradeColumnResize (event) {
+      const state = this.reviewTradeColumnResize
+      if (!state || !event) return
+      const col = this.reviewTradeColumns.find(item => item.key === state.key)
+      if (!col) return
+      const nextWidth = Math.min(col.max, Math.max(col.min, Math.round(state.startWidth + event.clientX - state.startX)))
+      this.$set(this.reviewTradeColumnWidths, col.key, nextWidth)
+    },
+
+    stopReviewTradeColumnResize () {
+      if (this.reviewTradeColumnResize) this.reviewTradeColumnResize = null
+      document.body.classList.remove('review-trades-resizing')
+      document.removeEventListener('mousemove', this.handleReviewTradeColumnResize)
+      document.removeEventListener('mouseup', this.stopReviewTradeColumnResize)
+    },
+
+    getReviewTradeScrollTarget (record, klineLength) {
+      if (!record || !Number.isFinite(klineLength) || klineLength <= 0) return null
+      const entryIndex = this.findReviewKlineIndexByTradeTime(record.entryTs)
+      const exitIndex = this.findReviewKlineIndexByTradeTime(record.exitTs)
+      const anchorIndex = entryIndex >= 0 ? entryIndex : exitIndex
+      if (anchorIndex < 0) return null
+
+      const chart = this.$refs.reviewKlineChart
+      const visibleRange = chart && typeof chart.getVisibleRange === 'function' ? chart.getVisibleRange() : null
+      const visibleCount = visibleRange && Number.isFinite(visibleRange.to) && Number.isFinite(visibleRange.from)
+        ? Math.max(30, Math.round(visibleRange.to - visibleRange.from))
+        : 80
+      const rightSpace = Math.max(6, Math.round(visibleCount * 0.6))
+      return { index: anchorIndex, entryIndex, exitIndex, rightSpace }
+    },
+
+    locateReviewTrade (record) {
+      if (!record) return
+      this.selectedReviewTradeId = record.id
+      const chart = this.$refs.reviewKlineChart
+      const chartInstance = this.getKlineChartInstance('reviewKlineChart')
+      const klineData = chartInstance && typeof chartInstance.getDataList === 'function' ? chartInstance.getDataList() : []
+      if (!chart || !klineData.length) return
+      const target = this.getReviewTradeScrollTarget(record, klineData.length)
+      const index = target ? target.index : this.findReviewKlineIndexByTradeTime(record.entryTs || record.exitTs)
+      let located = false
+      if (target && target.entryIndex >= 0 && target.exitIndex >= 0 && typeof chart.highlightReviewTradeRange === 'function') {
+        chart.highlightReviewTradeRange({
+          entryIndex: target.entryIndex,
+          exitIndex: target.exitIndex,
+          side: record.type,
+          color: record.type === 'short' ? '#ef4444' : '#22c55e',
+          entryLabel: 'Entry',
+          exitLabel: 'Exit'
+        })
+      }
+      if (index >= 0 && typeof chart.pinCrosshairByDataIndex === 'function') chart.pinCrosshairByDataIndex(index)
+      if (target && typeof chart.scrollToDataIndexWithRightSpace === 'function') {
+        located = chart.scrollToDataIndexWithRightSpace(target.index, target.rightSpace, 120)
+      }
+      if (!located && index >= 0 && typeof chart.scrollToDataIndex === 'function') chart.scrollToDataIndex(index)
+      if (index >= 0 && typeof chart.pinCrosshairByDataIndex === 'function') {
+        setTimeout(() => chart.pinCrosshairByDataIndex(index), 180)
+      }
     },
 
     // ===== Format helpers =====
@@ -6493,8 +6830,12 @@ export default {
     tradeTimeValue (value) {
       if (value == null || value === '') return 0
       if (value instanceof Date) return value.getTime()
-      if (typeof value === 'number') return value
-      const normalized = String(value).includes('T') ? String(value) : String(value).replace(' ', 'T')
+      if (typeof value === 'number') return value < 1e10 ? value * 1000 : value
+      let normalized = String(value).trim()
+      if (!normalized) return 0
+      if (!normalized.includes('T')) normalized = normalized.replace(' ', 'T')
+      if (!/:\d{2}$/.test(normalized) && /T\d{2}:\d{2}$/.test(normalized)) normalized += ':00'
+      if (!normalized.endsWith('Z') && !/[+-]\d{2}:?\d{2}$/.test(normalized)) normalized += 'Z'
       const parsed = new Date(normalized).getTime()
       return Number.isFinite(parsed) ? parsed : 0
     },
@@ -8673,6 +9014,195 @@ body.realdark .backtest-panel-toolbar {
 }
 .equity-chart { width: 100%; height: 200px; border-radius: 8px; }
 .equity-chart--zoom { height: 560px; }
+.equity-chart--review { height: 100%; min-height: 180px; }
+
+.backtest-review {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+.backtest-review__toolbar {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.96));
+}
+.backtest-review__kicker {
+  font-size: 12px;
+  color: #94a3b8;
+}
+.backtest-review__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+.backtest-review__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.backtest-review__content {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 196px;
+  grid-template-areas:
+    "price"
+    "trades";
+}
+.backtest-review__content.is-trades-collapsed {
+  grid-template-rows: minmax(0, 1fr) 44px;
+}
+.backtest-review__price-pane {
+  grid-area: price;
+  min-height: 180px;
+  overflow: hidden;
+}
+.backtest-review__price-pane ::v-deep .chart-left,
+.backtest-review__price-pane ::v-deep .chart-wrapper,
+.backtest-review__price-pane ::v-deep .chart-content-area,
+.backtest-review__price-pane ::v-deep .kline-chart-container {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+}
+.backtest-review__price-pane ::v-deep .chart-left {
+  flex: 1 1 100% !important;
+  border-right: none !important;
+}
+.backtest-review__trades {
+  grid-area: trades;
+  min-height: 0;
+  padding: 8px 14px 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(30, 41, 59, 0.92));
+  overflow: hidden;
+  color: #cbd5e1;
+}
+.backtest-review__trades.is-collapsed {
+  padding: 8px 16px;
+}
+.backtest-review__trades .trades-title {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  margin-bottom: 6px;
+  color: #e2e8f0;
+}
+.backtest-review__trades.is-collapsed .trades-title {
+  margin-bottom: 0;
+}
+.backtest-review__trades-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #94a3b8;
+}
+.backtest-review__trades-toggle {
+  margin-left: auto;
+  padding-right: 0;
+}
+.backtest-review__trades-scroll {
+  max-height: 150px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 6px;
+}
+.backtest-review__trades-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.backtest-review__trades-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.36);
+  border-radius: 999px;
+}
+.review-trades-table {
+  min-width: 100%;
+}
+.review-trades-table__header,
+.review-trades-table__row {
+  display: grid;
+  align-items: center;
+}
+.review-trades-table__header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 32px;
+  background: rgba(30, 41, 59, 0.98);
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+.review-trades-table__body {
+  max-height: 108px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.review-trades-table__row {
+  height: 36px;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 22px;
+  cursor: pointer;
+  background: rgba(15, 23, 42, 0.82);
+  border-top: 1px solid rgba(148, 163, 184, 0.10);
+}
+.review-trades-table__header > div,
+.review-trades-table__row > div {
+  position: relative;
+  min-width: 0;
+  padding: 0 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-trades-table__cell--header {
+  padding-right: 20px !important;
+  user-select: none;
+}
+.review-trades-table__resize-handle {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  bottom: 6px;
+  width: 8px;
+  cursor: col-resize;
+}
+.review-trades-table__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 3px;
+  bottom: 0;
+  width: 1px;
+  background: rgba(148, 163, 184, 0.34);
+}
+.review-trades-table__resize-handle:hover::after {
+  background: rgba(96, 165, 250, 0.82);
+}
+.review-trades-table ::v-deep .ant-tag {
+  min-height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 20px;
+}
+.review-trades-table__row.backtest-review__trade-row--active {
+  background: rgba(37, 99, 235, 0.24);
+}
 
 .ide-tuning-launch {
   padding: 0;
@@ -10992,6 +11522,32 @@ body.dark .ide-drawer-wrap--dark .ant-drawer-close {
 }
 .ant-modal-wrap.profile-exchange-modal {
   z-index: 10070 !important;
+}
+.ant-modal-wrap.backtest-review-modal {
+  z-index: 10090 !important;
+  overflow: hidden;
+}
+.ant-modal-wrap.backtest-review-modal .ant-modal {
+  top: 0;
+  max-width: 100vw;
+  height: 100vh;
+  padding-bottom: 0;
+  margin: 0;
+}
+.ant-modal-wrap.backtest-review-modal .ant-modal-content {
+  height: 100vh;
+  border-radius: 0;
+  overflow: hidden;
+}
+.ant-modal-wrap.backtest-review-modal .ant-modal-body {
+  height: 100vh;
+}
+body.review-trades-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+body.review-trades-resizing .review-trades-table__resize-handle::after {
+  background: rgba(96, 165, 250, 0.82);
 }
 .ant-select-dropdown.profile-exchange-select-dropdown,
 .ant-select-dropdown.profile-exchange-select-dropdown-dark {

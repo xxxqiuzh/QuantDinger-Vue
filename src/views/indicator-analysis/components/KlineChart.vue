@@ -1,7 +1,7 @@
 <template>
   <div ref="chartRootEl" class="chart-left" :class="{ 'theme-dark': chartTheme === 'dark' }">
     <div class="chart-wrapper">
-      <div class="drawing-toolbar">
+      <div v-if="!isReviewMode" class="drawing-toolbar">
         <a-tooltip
           v-for="tool in drawingTools"
           :key="tool.name"
@@ -24,7 +24,7 @@
         </a-tooltip>
       </div>
       <div class="chart-content-area">
-        <div class="indicator-toolbar">
+        <div v-if="!isReviewMode" class="indicator-toolbar">
           <div
             v-for="indicator in indicatorButtons"
             :key="indicator.id"
@@ -36,7 +36,7 @@
             {{ indicator.shortName }}
           </div>
         </div>
-        <div v-if="activePresetIndicators.length" class="indicator-active-bar">
+        <div v-if="!isReviewMode && activePresetIndicators.length" class="indicator-active-bar">
           <div
             v-for="indicator in activePresetIndicators"
             :key="indicator.instanceId || indicator.id"
@@ -70,7 +70,7 @@
           </div>
         </div>
         <div
-          id="kline-chart-container"
+          ref="chartContainerEl"
           class="kline-chart-container"
         ></div>
         <canvas
@@ -214,9 +214,25 @@ export default {
     userId: {
       type: Number,
       default: null
+    },
+    reviewEquityCurve: {
+      type: Array,
+      default: () => []
+    },
+    reviewBenchmarkCurve: {
+      type: Array,
+      default: () => []
+    },
+    reviewTimeRange: {
+      type: Object,
+      default: null
+    },
+    reviewHideIndicatorSignals: {
+      type: Boolean,
+      default: false
     }
   },
-  emits: ['retry', 'price-change', 'load', 'indicator-toggle', 'indicators-updated'],
+  emits: ['retry', 'price-change', 'load', 'crosshair-change', 'indicator-toggle', 'indicators-updated'],
   setup (props, { emit }) {
     const klineData = shallowRef([])
     const loading = ref(false)
@@ -227,17 +243,37 @@ export default {
     const chartInitialized = ref(false)
 
     const chartRef = shallowRef(null)
+    const chartContainerEl = ref(null)
     const chartTheme = ref(props.theme || 'light')
     let chartResizeObserver = null
     let chartResizeRafId = null
     let volEnsureRafId = null
     let volPaneEnsured = false
+    let volPaneId = null
     const VOL_PANE_OPTIONS = { height: 112, minHeight: 64, dragEnabled: true }
+    const REVIEW_EQUITY_INDICATOR_NAME = 'QD_REVIEW_EQUITY'
+    const REVIEW_EQUITY_PANE_OPTIONS = { height: 180, minHeight: 120, dragEnabled: true }
+    const REVIEW_EQUITY_FIELD = '__qdReviewEquity'
+    const REVIEW_BENCHMARK_FIELD = '__qdReviewBenchmark'
+    let reviewEquityPaneId = null
+    let reviewEquityEnsureRafId = null
+    let pinnedCrosshairOverlayIds = []
+    let reviewTradeRangeOverlayId = null
+    const pinnedCrosshairDataIndex = ref(null)
+    const lastCrosshairData = ref(null)
+    let pinnedCrosshairDblClickHandler = null
+    let pinnedCrosshairMouseLeaveHandler = null
+    const isReviewMode = computed(() => {
+      return !!props.reviewTimeRange ||
+        props.reviewHideIndicatorSignals ||
+        (Array.isArray(props.reviewEquityCurve) && props.reviewEquityCurve.length > 0) ||
+        (Array.isArray(props.reviewBenchmarkCurve) && props.reviewBenchmarkCurve.length > 0)
+    })
     const syncVolumePaneLayout = () => {
       if (!chartRef.value) return
       if (!volPaneEnsured && typeof chartRef.value.createIndicator === 'function') {
         try {
-          chartRef.value.createIndicator('VOL', false, VOL_PANE_OPTIONS)
+          volPaneId = chartRef.value.createIndicator('VOL', false, VOL_PANE_OPTIONS) || volPaneId
         } catch (e) {
         }
         volPaneEnsured = true
@@ -254,6 +290,103 @@ export default {
       volEnsureRafId = requestAnimationFrame(() => {
         volEnsureRafId = null
         syncVolumePaneLayout()
+      })
+    }
+
+    const normalizeReviewTime = (value) => {
+      if (value == null || value === '') return 0
+      if (value instanceof Date) return value.getTime()
+      if (typeof value === 'number') return value < 1e10 ? value * 1000 : value
+      let normalized = String(value).trim()
+      if (!normalized) return 0
+      if (!normalized.includes('T')) normalized = normalized.replace(' ', 'T')
+      if (!/:\d{2}$/.test(normalized) && /T\d{2}:\d{2}$/.test(normalized)) normalized += ':00'
+      if (!normalized.endsWith('Z') && !/[+-]\d{2}:?\d{2}$/.test(normalized)) normalized += 'Z'
+      const parsed = new Date(normalized).getTime()
+      return Number.isFinite(parsed) ? parsed : 0
+    }
+
+    const buildReviewSeries = (points = []) => {
+      return (Array.isArray(points) ? points : [])
+        .map(point => ({
+          ts: normalizeReviewTime(point && point.time),
+          value: Number(point && point.value)
+        }))
+        .filter(point => point.ts > 0 && Number.isFinite(point.value))
+        .sort((a, b) => a.ts - b.ts)
+    }
+
+    const findNearestReviewPoint = (series, ts) => {
+      if (!series.length || !ts) return null
+      const first = series[0]
+      const last = series[series.length - 1]
+      if (ts < first.ts || ts > last.ts) return null
+      let left = 0
+      let right = series.length - 1
+      while (left <= right) {
+        const mid = Math.floor((left + right) / 2)
+        if (series[mid].ts === ts) return series[mid]
+        if (series[mid].ts < ts) left = mid + 1
+        else right = mid - 1
+      }
+      const prev = series[Math.max(0, right)]
+      const next = series[Math.min(series.length - 1, left)]
+      if (!prev) return next || null
+      if (!next) return prev || null
+      return Math.abs(ts - prev.ts) <= Math.abs(next.ts - ts) ? prev : next
+    }
+
+    const timeframeDurationMs = () => {
+      const map = {
+        '1m': 60 * 1000,
+        '5m': 5 * 60 * 1000,
+        '15m': 15 * 60 * 1000,
+        '30m': 30 * 60 * 1000,
+        '1H': 60 * 60 * 1000,
+        '4H': 4 * 60 * 60 * 1000,
+        '1D': 24 * 60 * 60 * 1000,
+        '1W': 7 * 24 * 60 * 60 * 1000
+      }
+      return map[props.timeframe] || 24 * 60 * 60 * 1000
+    }
+
+    const normalizedReviewTimeRange = () => {
+      const range = props.reviewTimeRange || null
+      const start = normalizeReviewTime(range && range.start)
+      const end = normalizeReviewTime(range && range.end)
+      if (!start || !end) return null
+      return {
+        start: Math.min(start, end),
+        end: Math.max(start, end) + timeframeDurationMs() - 1
+      }
+    }
+
+    const filterReviewRangeData = (data) => {
+      const range = normalizedReviewTimeRange()
+      if (!range || !Array.isArray(data) || !data.length) return data
+      const filtered = data.filter(item => {
+        const ts = normalizeReviewTime(item && (item.timestamp || item.time))
+        return ts >= range.start && ts <= range.end
+      })
+      return filtered.length ? filtered : data
+    }
+
+    const syncReviewEquityValues = () => {
+      const equitySeries = buildReviewSeries(props.reviewEquityCurve)
+      const benchmarkSeries = buildReviewSeries(props.reviewBenchmarkCurve)
+      const hasReviewSeries = equitySeries.length > 0 || benchmarkSeries.length > 0
+      klineData.value.forEach(item => {
+        if (!item) return
+        if (!hasReviewSeries) {
+          delete item[REVIEW_EQUITY_FIELD]
+          delete item[REVIEW_BENCHMARK_FIELD]
+          return
+        }
+        const ts = normalizeReviewTime(item.timestamp || item.time)
+        const equityPoint = findNearestReviewPoint(equitySeries, ts)
+        const benchmarkPoint = findNearestReviewPoint(benchmarkSeries, ts)
+        item[REVIEW_EQUITY_FIELD] = equityPoint ? equityPoint.value : null
+        item[REVIEW_BENCHMARK_FIELD] = benchmarkPoint ? benchmarkPoint.value : null
       })
     }
 
@@ -829,6 +962,7 @@ export default {
           tooltipText: '#ccc',
           tooltipTextSecondary: '#888',
           axisLabelColor: '#787b86',
+          crosshairLineColor: '#fbbf24',
           splitAreaColor: ['rgba(250,250,250,0.05)', 'rgba(200,200,200,0.02)'],
           dataZoomBorder: '#2a2a2a',
           dataZoomFiller: 'rgba(41, 98, 255, 0.15)',
@@ -849,6 +983,7 @@ export default {
           tooltipText: '#333',
           tooltipTextSecondary: '#666',
           axisLabelColor: '#666',
+          crosshairLineColor: '#1677ff',
           splitAreaColor: ['rgba(250,250,250,0.05)', 'rgba(200,200,200,0.02)'],
           dataZoomBorder: '#e8e8e8',
           dataZoomFiller: 'rgba(24, 144, 255, 0.15)',
@@ -1287,6 +1422,105 @@ registerOverlay({
             styles: { color: solidTextColor, size: fontSize, weight: textWeight },
             ignoreEvent: true
           }
+        ]
+      }
+    })
+
+registerOverlay({
+      name: 'qdPinnedCrosshair',
+      totalStep: 1,
+      lock: true,
+      needDefaultPointFigure: false,
+      needDefaultXAxisFigure: false,
+      needDefaultYAxisFigure: false,
+      checkEventOn: () => false,
+      createPointFigures: ({ coordinates, overlay, bounding }) => {
+        if (!coordinates[0]) return []
+        const x = coordinates[0].x
+        const y = coordinates[0].y
+        const color = overlay.extendData?.color || '#fbbf24'
+        const verticalLine = {
+          type: 'line',
+          attrs: { coordinates: [{ x, y: 0 }, { x, y: bounding.height }] },
+          styles: { style: 'stroke', color, size: 1.5, dashedValue: [5, 4] },
+          ignoreEvent: true
+        }
+        if (overlay.extendData?.verticalOnly) return [verticalLine]
+        return [
+          verticalLine,
+          {
+            type: 'line',
+            attrs: { coordinates: [{ x: 0, y }, { x: bounding.width, y }] },
+            styles: { style: 'stroke', color, size: 1.5, dashedValue: [5, 4] },
+            ignoreEvent: true
+          },
+          {
+            type: 'circle',
+            attrs: { x, y, r: 3 },
+            styles: { style: 'fill', color },
+            ignoreEvent: true
+          }
+        ]
+      }
+    })
+
+registerOverlay({
+      name: 'qdReviewTradeRange',
+      totalStep: 2,
+      lock: true,
+      needDefaultPointFigure: false,
+      needDefaultXAxisFigure: false,
+      needDefaultYAxisFigure: false,
+      checkEventOn: () => false,
+      createPointFigures: ({ coordinates, overlay, bounding }) => {
+        if (!coordinates[0] || !coordinates[1]) return []
+        const entryX = coordinates[0].x
+        const exitX = coordinates[1].x
+        const x1 = Math.min(entryX, exitX)
+        const x2 = Math.max(entryX, exitX)
+        const data = overlay.extendData || {}
+        const side = String(data.side || '').toLowerCase()
+        const baseColor = data.color || (side === 'short' ? '#ef4444' : '#22c55e')
+        const entryLabel = data.entryLabel || 'Entry'
+        const exitLabel = data.exitLabel || 'Exit'
+        const labelY = 10
+        const labelHeight = 18
+        const labelWidth = 42
+        const makeLabel = (x, text, fillColor) => ({
+          type: 'rect',
+          attrs: { x: x - labelWidth / 2, y: labelY, width: labelWidth, height: labelHeight, r: 4 },
+          styles: { style: 'fill', color: fillColor, borderSize: 0 },
+          ignoreEvent: true
+        })
+        const makeLabelText = (x, text) => ({
+          type: 'text',
+          attrs: { x, y: labelY + labelHeight / 2, text, align: 'center', baseline: 'middle' },
+          styles: { color: '#ffffff', size: 10, weight: '700' },
+          ignoreEvent: true
+        })
+        return [
+          {
+            type: 'rect',
+            attrs: { x: x1, y: 0, width: Math.max(1, x2 - x1), height: bounding.height },
+            styles: { style: 'fill', color: withAlpha(baseColor, 0.08), borderSize: 0 },
+            ignoreEvent: true
+          },
+          {
+            type: 'line',
+            attrs: { coordinates: [{ x: entryX, y: 0 }, { x: entryX, y: bounding.height }] },
+            styles: { style: 'stroke', color: withAlpha(baseColor, 0.88), size: 1.4, dashedValue: [4, 4] },
+            ignoreEvent: true
+          },
+          {
+            type: 'line',
+            attrs: { coordinates: [{ x: exitX, y: 0 }, { x: exitX, y: bounding.height }] },
+            styles: { style: 'stroke', color: withAlpha('#f59e0b', 0.92), size: 1.4, dashedValue: [4, 4] },
+            ignoreEvent: true
+          },
+          makeLabel(entryX, entryLabel, baseColor),
+          makeLabelText(entryX, entryLabel),
+          makeLabel(exitX, exitLabel, '#f59e0b'),
+          makeLabelText(exitX, exitLabel)
         ]
       }
     })
@@ -1909,12 +2143,13 @@ registerOverlay({
           throw new Error('No K-line data returned')
         }
 
-        klineData.value = formattedData
-        hasMoreHistory.value = true
+        klineData.value = filterReviewRangeData(formattedData)
+        syncReviewEquityValues()
+        hasMoreHistory.value = !normalizedReviewTimeRange()
 
-        pricePrecision.value = calcPricePrecision(formattedData)
+        pricePrecision.value = calcPricePrecision(klineData.value)
 
-        const internalData = convertToInternalFormat(formattedData)
+        const internalData = convertToInternalFormat(klineData.value)
         updatePricePanel(internalData, { force: true })
 
         nextTick(() => {
@@ -1948,13 +2183,20 @@ registerOverlay({
             startRealtime()
           }
 
-          if (formattedData.length < 200 && hasMoreHistory.value) {
+          if (klineData.value.length < 200 && hasMoreHistory.value) {
             setTimeout(() => {
               if (klineData.value.length > 0 && klineData.value.length < 200 && hasMoreHistory.value) {
                 loadMoreHistoryDataForScroll(klineData.value[0].timestamp)
               }
             }, 1500)
           }
+
+          emit('load', {
+            symbol: props.symbol,
+            market: props.market,
+            timeframe: props.timeframe,
+            count: formattedData.length
+          })
         })
       } catch (err) {
         error.value = proxy.$t('dashboard.indicator.error.loadDataFailed') + ': ' + (err.message || proxy.$t('dashboard.indicator.error.loadDataFailedDesc'))
@@ -1972,6 +2214,10 @@ registerOverlay({
     }
 
     const loadMoreHistoryDataForScroll = async (timestamp) => {
+      if (normalizedReviewTimeRange()) {
+        hasMoreHistory.value = false
+        return
+      }
       if (!props.symbol || !klineData.value || klineData.value.length === 0) {
         return
       }
@@ -2043,6 +2289,7 @@ registerOverlay({
 
             const newDataCount = filteredNewData.length
             klineData.value = [...filteredNewData, ...klineData.value]
+            syncReviewEquityValues()
 
             nextTick(() => {
               if (chartRef.value) {
@@ -2089,6 +2336,10 @@ registerOverlay({
     }
 
     const loadMoreHistoryData = async () => {
+      if (normalizedReviewTimeRange()) {
+        hasMoreHistory.value = false
+        return
+      }
       if (!props.symbol || !klineData.value || klineData.value.length === 0) {
         return
       }
@@ -2131,6 +2382,7 @@ registerOverlay({
           }
 
           klineData.value = [...filteredNewData, ...klineData.value]
+          syncReviewEquityValues()
 
           nextTick(() => {
             if (chartRef.value) {
@@ -2436,14 +2688,14 @@ registerOverlay({
     }
 
     const initChart = () => {
-      const container = document.getElementById('kline-chart-container')
+      const container = chartContainerEl.value
       if (!container) return
 
       if (container.clientWidth === 0 || container.clientHeight === 0) {
         let retryCount = 0
         const maxRetries = 10
         const checkAndInit = () => {
-          const checkContainer = document.getElementById('kline-chart-container')
+          const checkContainer = chartContainerEl.value
           if (checkContainer && checkContainer.clientWidth > 0 && checkContainer.clientHeight > 0) {
             initChart()
           } else if (retryCount < maxRetries) {
@@ -2460,14 +2712,17 @@ registerOverlay({
       if (chartRef.value) {
         try {
           clearBacktestOverlays()
+          clearPinnedCrosshair()
           chartRef.value.destroy()
         } catch (e) {}
         chartRef.value = null
       }
       volPaneEnsured = false
+      volPaneId = null
+      reviewEquityPaneId = null
 
       try {
-        const container = document.getElementById('kline-chart-container')
+        const container = chartContainerEl.value
         if (!container) {
           throw new Error('容器元素不存在')
         }
@@ -2535,9 +2790,24 @@ registerOverlay({
           container.addEventListener('pointerdown', shiftMeasurePointerDownHandler, true)
         }
 
+        if (container && !pinnedCrosshairDblClickHandler) {
+          pinnedCrosshairDblClickHandler = (event) => {
+            togglePinnedCrosshairByData(resolveCrosshairDataFromEvent(event) || lastCrosshairData.value)
+          }
+          container.addEventListener('dblclick', pinnedCrosshairDblClickHandler)
+        }
+
+        if (container && !pinnedCrosshairMouseLeaveHandler) {
+          pinnedCrosshairMouseLeaveHandler = () => {
+            if (pinnedCrosshairDataIndex.value != null) pinCrosshairByDataIndex(pinnedCrosshairDataIndex.value)
+          }
+          container.addEventListener('mouseleave', pinnedCrosshairMouseLeaveHandler)
+        }
+
         if (chartRef.value && typeof chartRef.value.subscribeAction === 'function') {
           chartRef.value.subscribeAction('onDataReady', () => {
             scheduleSyncVolumePaneLayout()
+            scheduleSyncReviewEquityPane()
           })
         }
 
@@ -2597,6 +2867,13 @@ registerOverlay({
             if (index > -1) {
               addedDrawingOverlayIds.value.splice(index, 1)
             }
+          })
+        }
+
+        if (chartRef.value && typeof chartRef.value.subscribeAction === 'function') {
+          chartRef.value.subscribeAction('onCrosshairChange', (data) => {
+            if (pinnedCrosshairDataIndex.value == null) lastCrosshairData.value = data
+            emit('crosshair-change', data)
           })
         }
 
@@ -2694,7 +2971,7 @@ registerOverlay({
           }
         }, 100)
       } else {
-        const container = document.getElementById('kline-chart-container')
+        const container = chartContainerEl.value
         if (container && container.clientWidth > 0 && container.clientHeight > 0) {
           initChart()
         }
@@ -2706,6 +2983,7 @@ registerOverlay({
 
       const theme = themeConfig.value
       const isDark = chartTheme.value === 'dark'
+      const nativeCrosshairVisible = pinnedCrosshairDataIndex.value == null
 
       chartRef.value.setStyles({
         grid: {
@@ -2790,21 +3068,21 @@ registerOverlay({
         crosshair: {
           show: true,
           horizontal: {
-            show: true,
+            show: nativeCrosshairVisible,
             line: {
-              show: true,
+              show: nativeCrosshairVisible,
               style: 'dashed',
-              color: theme.gridLineColor,
-              size: 1
+              color: theme.crosshairLineColor,
+              size: 1.5
             }
           },
           vertical: {
-            show: true,
+            show: nativeCrosshairVisible,
             line: {
-              show: true,
+              show: nativeCrosshairVisible,
               style: 'dashed',
-              color: theme.gridLineColor,
-              size: 1
+              color: theme.crosshairLineColor,
+              size: 1.5
             }
           }
         },
@@ -2852,6 +3130,106 @@ registerOverlay({
         }
         return false
       }
+    }
+
+    const registerReviewEquityIndicator = () => {
+      try {
+        registerIndicator({
+          name: REVIEW_EQUITY_INDICATOR_NAME,
+          shortName: '资金曲线',
+          calcParams: [],
+          precision: 2,
+          shouldFormatBigNumber: true,
+          figures: [
+            {
+              key: 'equity',
+              title: '策略资金: ',
+              type: 'line',
+              styles: () => ({ color: '#52c41a', size: 2 })
+            },
+            {
+              key: 'benchmark',
+              title: '同期现货: ',
+              type: 'line',
+              styles: () => ({ color: '#13c2c2', size: 2, dashedValue: [4, 3] })
+            }
+          ],
+          calc: (dataList) => {
+            return (dataList || []).map(item => {
+              return {
+                equity: item ? item[REVIEW_EQUITY_FIELD] : null,
+                benchmark: item ? item[REVIEW_BENCHMARK_FIELD] : null
+              }
+            })
+          },
+          createTooltipDataSource: ({ indicator, crosshair }) => {
+            const dataIndex = Number(crosshair && crosshair.dataIndex)
+            const result = indicator && Array.isArray(indicator.result) ? indicator.result[dataIndex] : null
+            const values = []
+            if (result && Number.isFinite(Number(result.equity))) {
+              values.push({ title: '策略资金: ', value: Number(result.equity).toFixed(2), color: '#52c41a' })
+            }
+            if (result && Number.isFinite(Number(result.benchmark))) {
+              values.push({ title: '同期现货: ', value: Number(result.benchmark).toFixed(2), color: '#13c2c2' })
+            }
+            return {
+              name: '资金曲线',
+              calcParamsText: '',
+              values,
+              icons: []
+            }
+          }
+        })
+        return true
+      } catch (err) {
+        if (err && err.message && err.message.includes('already registered')) return true
+        return false
+      }
+    }
+
+    const clearReviewEquityPane = () => {
+      if (!chartRef.value || !reviewEquityPaneId) {
+        reviewEquityPaneId = null
+        return
+      }
+      try {
+        if (typeof chartRef.value.removeIndicator === 'function') {
+          chartRef.value.removeIndicator(reviewEquityPaneId, REVIEW_EQUITY_INDICATOR_NAME)
+        }
+      } catch (e) {
+      }
+      reviewEquityPaneId = null
+    }
+
+    const syncReviewEquityPane = (force = false) => {
+      if (!chartRef.value) return
+      const hasEquity = Array.isArray(props.reviewEquityCurve) && props.reviewEquityCurve.length > 0
+      if (!hasEquity) {
+        clearReviewEquityPane()
+        return
+      }
+      if (!registerReviewEquityIndicator()) return
+      if (reviewEquityPaneId && !force) return
+      try {
+        if (reviewEquityPaneId && typeof chartRef.value.removeIndicator === 'function') {
+          chartRef.value.removeIndicator(reviewEquityPaneId, REVIEW_EQUITY_INDICATOR_NAME)
+          reviewEquityPaneId = null
+        }
+        reviewEquityPaneId = chartRef.value.createIndicator(
+          REVIEW_EQUITY_INDICATOR_NAME,
+          false,
+          REVIEW_EQUITY_PANE_OPTIONS
+        )
+      } catch (e) {
+      }
+    }
+
+    const scheduleSyncReviewEquityPane = (force = false) => {
+      if (reviewEquityEnsureRafId != null) cancelAnimationFrame(reviewEquityEnsureRafId)
+      reviewEquityEnsureRafId = requestAnimationFrame(() => {
+        reviewEquityEnsureRafId = null
+        syncReviewEquityPane(force)
+      })
     }
 
     const normalizeLayerTimestamp = (value, internalData, fallbackIndex = null) => {
@@ -3051,7 +3429,7 @@ registerOverlay({
                 }
                 renderIndicatorLayers(result && result.layers, internalData)
 
-                if (result && result.signals && Array.isArray(result.signals)) {
+                if (!props.reviewHideIndicatorSignals && result && result.signals && Array.isArray(result.signals)) {
                   for (const signal of result.signals) {
                     if (signal.data && Array.isArray(signal.data) && signal.data.length > 0) {
                       const sampleValues = []
@@ -3242,7 +3620,7 @@ registerOverlay({
                 }
                 renderIndicatorLayers(pythonResult && pythonResult.layers, internalData)
 
-                if (pythonResult && pythonResult.signals && Array.isArray(pythonResult.signals)) {
+                if (!props.reviewHideIndicatorSignals && pythonResult && pythonResult.signals && Array.isArray(pythonResult.signals)) {
                   for (const signal of pythonResult.signals) {
                     if (signal.data && Array.isArray(signal.data) && signal.data.length > 0) {
                       const sampleValues = []
@@ -3892,6 +4270,273 @@ registerOverlay({
 
     const getChartInstance = () => chartRef.value || null
 
+    const syncNativeCrosshairByDataIndex = (dataIndex, item, value) => {
+      const inst = chartRef.value
+      const index = Number(dataIndex)
+      if (!inst || !Number.isInteger(index) || !item || typeof inst.convertToPixel !== 'function' || typeof inst.executeAction !== 'function') return false
+      try {
+        const points = inst.convertToPixel([{
+          dataIndex: index,
+          timestamp: item.timestamp || item.time,
+          value
+        }], { paneId: 'candle_pane' })
+        const coordinate = Array.isArray(points) ? points[0] : points
+        if (!coordinate || !Number.isFinite(Number(coordinate.x))) return false
+        inst.executeAction('onCrosshairChange', {
+          x: Number(coordinate.x),
+          y: Number.isFinite(Number(coordinate.y)) ? Number(coordinate.y) : 0,
+          paneId: 'candle_pane'
+        })
+        return true
+      } catch (_) {
+        return false
+      }
+    }
+
+    const setNativeCrosshairVisible = (visible) => {
+      const inst = chartRef.value
+      if (!inst || typeof inst.setStyles !== 'function') return
+      const theme = themeConfig.value
+      try {
+        inst.setStyles({
+          crosshair: {
+            horizontal: {
+              show: visible,
+              line: {
+                show: visible,
+                style: 'dashed',
+                color: theme.crosshairLineColor,
+                size: 1.5
+              }
+            },
+            vertical: {
+              show: visible,
+              line: {
+                show: visible,
+                style: 'dashed',
+                color: theme.crosshairLineColor,
+                size: 1.5
+              }
+            }
+          }
+        })
+      } catch (_) {
+      }
+    }
+
+    const clearPinnedCrosshair = () => {
+      const inst = chartRef.value
+      if (inst && pinnedCrosshairOverlayIds.length) {
+        try {
+          if (typeof inst.removeOverlay === 'function') {
+            pinnedCrosshairOverlayIds.forEach(id => inst.removeOverlay(id))
+          }
+        } catch (_) {}
+      }
+      pinnedCrosshairOverlayIds = []
+      pinnedCrosshairDataIndex.value = null
+      setNativeCrosshairVisible(true)
+    }
+
+    const clearReviewTradeRange = () => {
+      const inst = chartRef.value
+      if (inst && reviewTradeRangeOverlayId) {
+        try {
+          if (typeof inst.removeOverlay === 'function') inst.removeOverlay(reviewTradeRangeOverlayId)
+        } catch (_) {}
+      }
+      reviewTradeRangeOverlayId = null
+    }
+
+    const pinCrosshairByDataIndex = (dataIndex) => {
+      const inst = chartRef.value
+      const index = Number(dataIndex)
+      const dataList = inst && typeof inst.getDataList === 'function' ? inst.getDataList() : []
+      if (!inst || !Number.isInteger(index) || index < 0 || index >= dataList.length || typeof inst.createOverlay !== 'function') return false
+      const item = dataList[index]
+      const timestamp = item && (item.timestamp || item.time)
+      const value = item && Number.isFinite(Number(item.close)) ? Number(item.close) : Number(item && item.value)
+      if (!timestamp || !Number.isFinite(value)) return false
+      syncNativeCrosshairByDataIndex(index, item, value)
+      if (pinnedCrosshairDataIndex.value === index && pinnedCrosshairOverlayIds.length) return true
+      clearPinnedCrosshair()
+      try {
+        const createdIds = []
+        const createPinnedOverlay = (paneId, pointValue, verticalOnly = false) => {
+          if (!paneId || !Number.isFinite(Number(pointValue))) return
+          const overlayId = inst.createOverlay({
+            name: 'qdPinnedCrosshair',
+            lock: true,
+            points: [{ timestamp, value: Number(pointValue) }],
+            extendData: { color: themeConfig.value.crosshairLineColor, verticalOnly }
+          }, paneId)
+          if (overlayId) createdIds.push(overlayId)
+        }
+        createPinnedOverlay('candle_pane', value, false)
+        createPinnedOverlay(volPaneId, Number(item.volume || 0), true)
+        createPinnedOverlay(reviewEquityPaneId, Number(item[REVIEW_EQUITY_FIELD] ?? item[REVIEW_BENCHMARK_FIELD]), true)
+        if (!createdIds.length) return false
+        pinnedCrosshairOverlayIds = createdIds
+        pinnedCrosshairDataIndex.value = index
+        setNativeCrosshairVisible(false)
+        return true
+      } catch (_) {
+        pinnedCrosshairOverlayIds.forEach(id => {
+          try {
+            if (typeof inst.removeOverlay === 'function') inst.removeOverlay(id)
+          } catch (e) {}
+        })
+        pinnedCrosshairOverlayIds = []
+        pinnedCrosshairDataIndex.value = null
+        setNativeCrosshairVisible(true)
+        return false
+      }
+    }
+
+    const highlightReviewTradeRange = (payload = {}) => {
+      const inst = chartRef.value
+      const dataList = inst && typeof inst.getDataList === 'function' ? inst.getDataList() : []
+      const entryIndex = Number(payload.entryIndex)
+      const exitIndex = Number(payload.exitIndex)
+      if (!inst || typeof inst.createOverlay !== 'function' || !Number.isInteger(entryIndex) || !Number.isInteger(exitIndex)) return false
+      if (entryIndex < 0 || exitIndex < 0 || entryIndex >= dataList.length || exitIndex >= dataList.length) return false
+      const entry = dataList[entryIndex]
+      const exit = dataList[exitIndex]
+      const entryValue = Number.isFinite(Number(entry && entry.close)) ? Number(entry.close) : Number(entry && entry.value)
+      const exitValue = Number.isFinite(Number(exit && exit.close)) ? Number(exit.close) : Number(exit && exit.value)
+      if (!entry || !exit || !Number.isFinite(entryValue) || !Number.isFinite(exitValue)) return false
+      clearReviewTradeRange()
+      try {
+        reviewTradeRangeOverlayId = inst.createOverlay({
+          name: 'qdReviewTradeRange',
+          lock: true,
+          points: [
+            { dataIndex: entryIndex, timestamp: entry.timestamp || entry.time, value: entryValue },
+            { dataIndex: exitIndex, timestamp: exit.timestamp || exit.time, value: exitValue }
+          ],
+          extendData: {
+            side: payload.side,
+            color: payload.color,
+            entryLabel: payload.entryLabel || 'Entry',
+            exitLabel: payload.exitLabel || 'Exit'
+          }
+        }, 'candle_pane')
+        return !!reviewTradeRangeOverlayId
+      } catch (_) {
+        reviewTradeRangeOverlayId = null
+        return false
+      }
+    }
+    const normalizeCrosshairDataIndex = (data) => {
+      const directIndex = Number(data && data.dataIndex)
+      if (Number.isInteger(directIndex) && directIndex >= 0) return directIndex
+      const kLineData = data && (data.kLineData || data.data)
+      const ts = kLineData && Number(kLineData.timestamp || kLineData.time)
+      const dataList = chartRef.value && typeof chartRef.value.getDataList === 'function' ? chartRef.value.getDataList() : []
+      if (Number.isFinite(ts) && dataList.length) {
+        const normalizedTs = ts < 1e10 ? ts * 1000 : ts
+        return dataList.findIndex(item => Number(item.timestamp || item.time) === normalizedTs)
+      }
+      return -1
+    }
+
+    const resolveCrosshairDataFromEvent = (event) => {
+      const inst = chartRef.value
+      const container = chartContainerEl.value
+      if (!inst || !container || !event || typeof inst.convertFromPixel !== 'function') return null
+      const rect = container.getBoundingClientRect()
+      const coordinates = [
+        { x: event.clientX - rect.left, y: event.clientY - rect.top },
+        { x: event.offsetX, y: event.offsetY }
+      ]
+      const finders = [
+        { paneId: 'candle_pane', absolute: true },
+        { paneId: 'candle_pane' },
+        { absolute: true },
+        {}
+      ]
+      for (const coordinate of coordinates) {
+        for (const finder of finders) {
+          try {
+            const points = inst.convertFromPixel([coordinate], finder)
+            const point = Array.isArray(points) ? points[0] : points
+            const index = Number(point && point.dataIndex)
+            if (Number.isInteger(index) && index >= 0) return { dataIndex: index }
+          } catch (_) {
+          }
+        }
+      }
+      return null
+    }
+
+    const togglePinnedCrosshairByData = (data) => {
+      if (pinnedCrosshairDataIndex.value != null) {
+        clearPinnedCrosshair()
+        clearReviewTradeRange()
+        return true
+      }
+      const dataIndex = normalizeCrosshairDataIndex(data)
+      const index = dataIndex >= 0 ? dataIndex : normalizeCrosshairDataIndex(lastCrosshairData.value)
+      if (index < 0) return false
+      return pinCrosshairByDataIndex(index)
+    }
+
+    const getVisibleRange = () => {
+      const inst = chartRef.value
+      if (!inst || typeof inst.getVisibleRange !== 'function') return null
+      try {
+        return inst.getVisibleRange()
+      } catch (_) {
+        return null
+      }
+    }
+
+    const setVisibleRange = (from, to) => {
+      const inst = chartRef.value
+      if (!inst || typeof inst.setVisibleRange !== 'function') return false
+      try {
+        inst.setVisibleRange(from, to)
+        return true
+      } catch (_) {
+        return false
+      }
+    }
+
+    const scrollToDataIndexWithRightSpace = (dataIndex, rightBarCount = 0, animationDuration = 200) => {
+      const inst = chartRef.value
+      const dataList = inst && typeof inst.getDataList === 'function' ? inst.getDataList() : []
+      const index = Number(dataIndex)
+      const offset = Number(rightBarCount)
+      if (!inst || !dataList.length || !Number.isFinite(index) || typeof inst.scrollToDataIndex !== 'function') return false
+      const desiredIndex = Math.round(index + (Number.isFinite(offset) ? offset : 0))
+      const targetIndex = Math.max(0, Math.min(desiredIndex, dataList.length - 1))
+      try {
+        const overflowBars = Math.max(0, desiredIndex - (dataList.length - 1))
+        if (overflowBars > 0 && typeof inst.setOffsetRightDistance === 'function') {
+          const barSpace = typeof inst.getBarSpace === 'function' ? inst.getBarSpace() : 8
+          inst.setOffsetRightDistance(Math.ceil(overflowBars * barSpace))
+        } else if (typeof inst.setOffsetRightDistance === 'function') {
+          inst.setOffsetRightDistance(0)
+        }
+        inst.scrollToDataIndex(targetIndex, animationDuration)
+        return true
+      } catch (_) {
+        return false
+      }
+    }
+
+    const scrollToDataIndex = (dataIndex, animationDuration = 200) => {
+      const inst = chartRef.value
+      const index = Number(dataIndex)
+      if (!inst || !Number.isInteger(index) || index < 0 || typeof inst.scrollToDataIndex !== 'function') return false
+      try {
+        inst.scrollToDataIndex(index, animationDuration)
+        return true
+      } catch (_) {
+        return false
+      }
+    }
+
     const clearBacktestOverlays = () => {
       const inst = chartRef.value
       if (!inst) {
@@ -3964,6 +4609,16 @@ registerOverlay({
       }
     }, { deep: true })
 
+    watch(() => [props.reviewEquityCurve, props.reviewBenchmarkCurve], () => {
+      if (chartRef.value && klineData.value.length > 0) {
+        nextTick(() => {
+          syncReviewEquityValues()
+          if (typeof chartRef.value.applyNewData === 'function') chartRef.value.applyNewData(klineData.value)
+          scheduleSyncReviewEquityPane(true)
+        })
+      }
+    }, { deep: true })
+
     watch(() => props.realtimeEnabled, (newVal) => {
       if (newVal) {
         startRealtime()
@@ -3982,14 +4637,16 @@ registerOverlay({
 
       nextTick(() => {
         setTimeout(() => {
-          if (!chartRef.value && props.symbol) {
+          if (props.symbol && !klineData.value.length && !loading.value) {
+            loadKlineData()
+          } else if (!chartRef.value && props.symbol) {
             initChart()
           }
         }, 300)
       })
 
       nextTick(() => {
-        const el = document.getElementById('kline-chart-container')
+        const el = chartContainerEl.value
         if (!el || typeof ResizeObserver === 'undefined') return
         chartResizeObserver = new ResizeObserver(() => {
           if (chartResizeRafId != null) cancelAnimationFrame(chartResizeRafId)
@@ -3998,8 +4655,9 @@ registerOverlay({
             if (chartRef.value && typeof chartRef.value.resize === 'function') {
               chartRef.value.resize()
               scheduleSyncVolumePaneLayout()
+              scheduleSyncReviewEquityPane()
             } else {
-              const c = document.getElementById('kline-chart-container')
+              const c = chartContainerEl.value
               if (c && c.clientWidth > 0 && c.clientHeight > 0) {
                 initChart()
               }
@@ -4103,22 +4761,36 @@ registerOverlay({
         cancelAnimationFrame(volEnsureRafId)
         volEnsureRafId = null
       }
+      if (reviewEquityEnsureRafId != null) {
+        cancelAnimationFrame(reviewEquityEnsureRafId)
+        reviewEquityEnsureRafId = null
+      }
       if (chartResizeObserver) {
         chartResizeObserver.disconnect()
         chartResizeObserver = null
       }
       if (_wmTimer) { clearInterval(_wmTimer); _wmTimer = null }
       if (_wmObserver) { _wmObserver.disconnect(); _wmObserver = null }
-      const chartContainer = document.getElementById('kline-chart-container')
+      const chartContainer = chartContainerEl.value
       if (chartContainer && shiftMeasurePointerDownHandler) {
         chartContainer.removeEventListener('pointerdown', shiftMeasurePointerDownHandler, true)
         shiftMeasurePointerDownHandler = null
       }
+      if (chartContainer && pinnedCrosshairDblClickHandler) {
+        chartContainer.removeEventListener('dblclick', pinnedCrosshairDblClickHandler)
+        pinnedCrosshairDblClickHandler = null
+      }
+      if (chartContainer && pinnedCrosshairMouseLeaveHandler) {
+        chartContainer.removeEventListener('mouseleave', pinnedCrosshairMouseLeaveHandler)
+        pinnedCrosshairMouseLeaveHandler = null
+      }
       if (chartRef.value) {
+        clearPinnedCrosshair()
         chartRef.value.destroy()
         chartRef.value = null
       }
       volPaneEnsured = false
+      volPaneId = null
       window.removeEventListener('resize', handleResize)
     })
 
@@ -4128,6 +4800,7 @@ registerOverlay({
       error,
       loadingHistory,
       chartRef,
+      chartContainerEl,
       chartTheme,
       themeConfig,
       wmCanvasRef,
@@ -4163,6 +4836,7 @@ registerOverlay({
       indicatorEditorSchema,
       indicatorEditorTitle,
       indicatorEditorModalWrapClass,
+      isReviewMode,
       formatIndicatorInstanceLabel,
       openIndicatorEditor,
       closeIndicatorEditor,
@@ -4176,6 +4850,14 @@ registerOverlay({
       addedSignalOverlayIds,
       addedBacktestOverlayIds,
       getChartInstance,
+      getVisibleRange,
+      setVisibleRange,
+      clearPinnedCrosshair,
+      pinCrosshairByDataIndex,
+      clearReviewTradeRange,
+      highlightReviewTradeRange,
+      scrollToDataIndexWithRightSpace,
+      scrollToDataIndex,
       clearBacktestOverlays,
       addBacktestOverlay
     }
