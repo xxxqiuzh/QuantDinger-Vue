@@ -864,6 +864,36 @@
                                     </div>
                                     <div class="backtest-review__actions">
                                       <a-tag color="blue">K 线 + 资金曲线</a-tag>
+                                      <a-dropdown
+                                        :trigger="['click']"
+                                        :disabled="!reviewOutputPlots.length"
+                                        :visible="reviewOutputPlotDropdownVisible"
+                                        :get-popup-container="reviewPlotDropdownGetPopupContainer"
+                                        @visibleChange="reviewOutputPlotDropdownVisible = $event"
+                                      >
+                                        <a-button
+                                          size="small"
+                                          :type="visibleReviewOutputPlots.length ? 'primary' : 'default'"
+                                          :disabled="!reviewOutputPlots.length"
+                                        >
+                                          plots {{ visibleReviewOutputPlots.length }}/{{ reviewOutputPlots.length }}
+                                          <a-icon type="down" />
+                                        </a-button>
+                                        <a-menu
+                                          slot="overlay"
+                                          class="backtest-review__plot-menu"
+                                          @mouseleave="reviewOutputPlotDropdownVisible = false"
+                                        >
+                                          <a-menu-item
+                                            v-for="plot in reviewOutputPlots"
+                                            :key="plot.name"
+                                            @click="toggleReviewOutputPlot(plot.name)"
+                                          >
+                                            <a-icon :type="reviewOutputPlotVisible(plot.name) ? 'check' : 'minus'" />
+                                            <span>{{ plot.name }}</span>
+                                          </a-menu-item>
+                                        </a-menu>
+                                      </a-dropdown>
                                       <a-button icon="close" @click="closeEquityZoom">关闭</a-button>
                                     </div>
                                   </div>
@@ -878,7 +908,7 @@
                                         :market="market"
                                         :timeframe="timeframe"
                                         :theme="chartTheme"
-                                        :activeIndicators="activeIndicators"
+                                        :activeIndicators="reviewChartActiveIndicators"
                                         :userId="userId"
                                         :realtime-enabled="false"
                                         :review-equity-curve="result && result.equityCurve ? result.equityCurve : []"
@@ -1936,7 +1966,9 @@ export default {
       backtestMarkerWatchKey: null,
       // Backtest executions should stay visible on the chart so users can
       // compare indicator signals with actual fills and risk exits.
-      backtestMarkersVisible: true
+      backtestMarkersVisible: true,
+      reviewOutputPlotDropdownVisible: false,
+      reviewOutputPlotVisibility: {}
     }
   },
   computed: {
@@ -1962,6 +1994,33 @@ export default {
         start: equity[0] && equity[0].time,
         end: equity[equity.length - 1] && equity[equity.length - 1].time
       }
+    },
+    reviewOutputPlots () {
+      const plots = this.result && Array.isArray(this.result.plots) ? this.result.plots : []
+      return plots.filter(plot => plot && Array.isArray(plot.data) && plot.data.length > 0)
+    },
+    visibleReviewOutputPlots () {
+      return this.reviewOutputPlots.filter(plot => this.reviewOutputPlotVisible(plot.name))
+    },
+    reviewChartActiveIndicators () {
+      const baseIndicators = this.activeIndicators.filter(item => !this.isIdePythonActiveItem(item))
+      if (!this.visibleReviewOutputPlots.length) return baseIndicators
+      return [
+        ...baseIndicators,
+        {
+          id: 'review-output-plots',
+          instanceId: 'review-output-plots',
+          name: 'Backtest Output Plots',
+          type: 'python',
+          visible: true,
+          code: '# review output plots',
+          calculate: () => ({
+            name: 'Backtest Output',
+            plots: this.visibleReviewOutputPlots,
+            signals: []
+          })
+        }
+      ]
     },
     strategyDirectivesSummary () {
       const raw = this.parseStrategyAnnotationRaw(this.currentCode || '')
@@ -6585,11 +6644,30 @@ export default {
     toggleBacktestQualityChecks () {
       this.backtestQualityChecksExpanded = !this.backtestQualityChecksExpanded
     },
+    reviewOutputPlotVisible (name) {
+      if (!name) return false
+      return this.reviewOutputPlotVisibility[name] === true
+    },
+    toggleReviewOutputPlot (name) {
+      if (!name) return
+      this.reviewOutputPlotVisibility = {
+        ...this.reviewOutputPlotVisibility,
+        [name]: !this.reviewOutputPlotVisible(name)
+      }
+      this.$nextTick(() => {
+        this.reviewOutputPlotDropdownVisible = true
+      })
+    },
+    reviewPlotDropdownGetPopupContainer (trigger) {
+      return (trigger && trigger.closest && trigger.closest('.backtest-review')) || document.body
+    },
 
     openEquityZoom () {
       this.equityZoomVisible = true
       this.selectedReviewTradeId = null
       this.reviewTradesExpanded = false
+      this.reviewOutputPlotDropdownVisible = false
+      this.reviewOutputPlotVisibility = {}
       this.$nextTick(() => {
         ;[120, 350, 700].forEach(delay => {
           setTimeout(() => {
@@ -6609,6 +6687,8 @@ export default {
       this.equityZoomVisible = false
       this.selectedReviewTradeId = null
       this.reviewTradesExpanded = false
+      this.reviewOutputPlotDropdownVisible = false
+      this.reviewOutputPlotVisibility = {}
       this.clearBacktestSignalOverlays({ silent: true, refName: 'reviewKlineChart' })
     },
 
@@ -9049,6 +9129,13 @@ body.realdark .backtest-panel-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.backtest-review__plot-menu .ant-dropdown-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .backtest-review__content {
   position: relative;

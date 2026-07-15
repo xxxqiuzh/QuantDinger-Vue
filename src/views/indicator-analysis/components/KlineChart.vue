@@ -234,6 +234,7 @@ export default {
   },
   emits: ['retry', 'price-change', 'load', 'crosshair-change', 'indicator-toggle', 'indicators-updated'],
   setup (props, { emit }) {
+    const isPreviewMode = process.env.VUE_APP_PREVIEW === 'true'
     const klineData = shallowRef([])
     const loading = ref(false)
     const error = ref(null)
@@ -2648,6 +2649,11 @@ registerOverlay({
       const gen = ++_realtimeGeneration
 
       if (!props.realtimeEnabled || !props.symbol || klineData.value.length === 0) return
+
+      if (isPreviewMode) {
+        startRestPolling()
+        return
+      }
 
       if (isCryptoMarket()) {
         try {
