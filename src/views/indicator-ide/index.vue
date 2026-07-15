@@ -801,12 +801,14 @@
                                 >
                                   <span class="backtest-checklist__title">
                                     <a-icon type="audit" /> 回测检查清单
-                                    <a-icon :type="backtestQualityChecksExpanded ? 'up' : 'down'" class="backtest-checklist__toggle-icon" />
                                   </span>
-                                  <div class="backtest-checklist__summary">
-                                    <span v-if="backtestQualityCheckCounts.FAIL" class="backtest-quality-chip backtest-quality-chip--danger">FAIL <strong>{{ backtestQualityCheckCounts.FAIL }}</strong></span>
-                                    <span v-if="backtestQualityCheckCounts.WARN" class="backtest-quality-chip backtest-quality-chip--warn">WARN <strong>{{ backtestQualityCheckCounts.WARN }}</strong></span>
-                                    <span class="backtest-quality-chip backtest-quality-chip--good">PASS <strong>{{ backtestQualityCheckCounts.PASS }}</strong></span>
+                                  <div class="backtest-checklist__actions">
+                                    <div class="backtest-checklist__summary">
+                                      <span v-if="backtestQualityCheckCounts.FAIL" class="backtest-quality-chip backtest-quality-chip--danger">FAIL <strong>{{ backtestQualityCheckCounts.FAIL }}</strong></span>
+                                      <span v-if="backtestQualityCheckCounts.WARN" class="backtest-quality-chip backtest-quality-chip--warn">WARN <strong>{{ backtestQualityCheckCounts.WARN }}</strong></span>
+                                      <span class="backtest-quality-chip backtest-quality-chip--good">PASS <strong>{{ backtestQualityCheckCounts.PASS }}</strong></span>
+                                    </div>
+                                    <a-icon :type="backtestQualityChecksExpanded ? 'up' : 'down'" class="backtest-checklist__toggle-icon" />
                                   </div>
                                 </div>
                                 <div v-show="backtestQualityChecksExpanded" class="backtest-checklist__list">
@@ -863,7 +865,24 @@
                                       </div>
                                     </div>
                                     <div class="backtest-review__actions">
-                                      <a-tag color="blue">K 线 + 资金曲线</a-tag>
+                                      <a-button
+                                        size="small"
+                                        class="backtest-review__toggle-button"
+                                        :type="reviewShowVolume ? 'primary' : 'default'"
+                                        @click="toggleReviewVolume"
+                                      >VOL</a-button>
+                                      <a-button
+                                        size="small"
+                                        class="backtest-review__toggle-button"
+                                        :type="reviewShowEquity ? 'primary' : 'default'"
+                                        @click="toggleReviewEquity"
+                                      >资金面板</a-button>
+                                      <a-button
+                                        size="small"
+                                        class="backtest-review__toggle-button"
+                                        :type="reviewTradesExpanded ? 'primary' : 'default'"
+                                        @click="toggleReviewTrades"
+                                      >交易记录 {{ pairedTrades.length }}</a-button>
                                       <a-dropdown
                                         :trigger="['click']"
                                         :disabled="!reviewOutputPlots.length"
@@ -873,10 +892,11 @@
                                       >
                                         <a-button
                                           size="small"
+                                          class="backtest-review__plot-button"
                                           :type="visibleReviewOutputPlots.length ? 'primary' : 'default'"
                                           :disabled="!reviewOutputPlots.length"
                                         >
-                                          plots {{ visibleReviewOutputPlots.length }}/{{ reviewOutputPlots.length }}
+                                          指标线 {{ visibleReviewOutputPlots.length }}/{{ reviewOutputPlots.length }}
                                           <a-icon type="down" />
                                         </a-button>
                                         <a-menu
@@ -890,7 +910,9 @@
                                             @click="toggleReviewOutputPlot(plot.name)"
                                           >
                                             <a-icon :type="reviewOutputPlotVisible(plot.name) ? 'check' : 'minus'" />
-                                            <span>{{ plot.name }}</span>
+                                            <span class="backtest-review__plot-name" :title="reviewPlotDisplayName(plot.name)">
+                                              {{ reviewPlotDisplayName(plot.name) }}
+                                            </span>
                                           </a-menu-item>
                                         </a-menu>
                                       </a-dropdown>
@@ -911,32 +933,28 @@
                                         :activeIndicators="reviewChartActiveIndicators"
                                         :userId="userId"
                                         :realtime-enabled="false"
-                                        :review-equity-curve="result && result.equityCurve ? result.equityCurve : []"
-                                        :review-benchmark-curve="result && result.benchmarkCurve ? result.benchmarkCurve : []"
+                                        :review-equity-curve="reviewEquityCurveForChart"
+                                        :review-benchmark-curve="reviewBenchmarkCurveForChart"
                                         :review-time-range="reviewKlineTimeRange"
                                         :review-hide-indicator-signals="true"
+                                        :review-show-volume="reviewShowVolume"
+                                        :review-show-equity="reviewShowEquity"
+                                        :review-enable-indicator-controls="true"
                                         @load="onReviewKlineLoaded"
+                                        @indicator-toggle="handleReviewIndicatorToggle"
                                       />
                                     </div>
                                     <div
+                                      v-if="reviewTradesExpanded"
                                       class="backtest-review__trades"
-                                      :class="{ 'is-collapsed': !reviewTradesExpanded }"
                                     >
                                       <div class="trades-title">
                                         <a-icon type="swap" style="margin-right: 6px;" />
                                         交易记录
                                         <span class="trades-count">({{ pairedTrades.length }})</span>
                                         <span class="backtest-review__trades-hint">点击记录定位到对应 K 线</span>
-                                        <a-button
-                                          class="backtest-review__trades-toggle"
-                                          size="small"
-                                          type="link"
-                                          @click="toggleReviewTrades"
-                                        >
-                                          {{ reviewTradesExpanded ? '收起' : '展开' }}
-                                        </a-button>
                                       </div>
-                                      <div v-show="reviewTradesExpanded" class="backtest-review__trades-scroll">
+                                      <div class="backtest-review__trades-scroll">
                                         <div class="review-trades-table" :style="reviewTradeTableStyle">
                                           <div class="review-trades-table__header" :style="reviewTradeGridStyle">
                                             <div
@@ -1869,6 +1887,9 @@ export default {
       backtestRunId: null,
 
       activeIndicators: [],
+      reviewIndicators: [],
+      reviewShowVolume: true,
+      reviewShowEquity: true,
       chartIndicatorRunning: true,
       quickTradeDrawerVisible: false,
 
@@ -2002,8 +2023,14 @@ export default {
     visibleReviewOutputPlots () {
       return this.reviewOutputPlots.filter(plot => this.reviewOutputPlotVisible(plot.name))
     },
+    reviewEquityCurveForChart () {
+      return this.reviewShowEquity && this.result && Array.isArray(this.result.equityCurve) ? this.result.equityCurve : []
+    },
+    reviewBenchmarkCurveForChart () {
+      return this.reviewShowEquity && this.result && Array.isArray(this.result.benchmarkCurve) ? this.result.benchmarkCurve : []
+    },
     reviewChartActiveIndicators () {
-      const baseIndicators = this.activeIndicators.filter(item => !this.isIdePythonActiveItem(item))
+      const baseIndicators = this.reviewIndicators.filter(item => item && item.type !== 'python')
       if (!this.visibleReviewOutputPlots.length) return baseIndicators
       return [
         ...baseIndicators,
@@ -6648,6 +6675,9 @@ export default {
       if (!name) return false
       return this.reviewOutputPlotVisibility[name] === true
     },
+    reviewPlotDisplayName (name) {
+      return String(name || '').replace(/^preview\s+/i, '')
+    },
     toggleReviewOutputPlot (name) {
       if (!name) return
       this.reviewOutputPlotVisibility = {
@@ -6661,6 +6691,56 @@ export default {
     reviewPlotDropdownGetPopupContainer (trigger) {
       return (trigger && trigger.closest && trigger.closest('.backtest-review')) || document.body
     },
+    preserveReviewChartViewport () {
+      const chart = this.$refs.reviewKlineChart
+      if (chart && typeof chart.preserveReviewViewportForLayoutChange === 'function') {
+        chart.preserveReviewViewportForLayoutChange()
+      }
+    },
+    refreshReviewBacktestOverlays () {
+      ;[450, 900].forEach(delay => {
+        setTimeout(() => {
+          this.renderBacktestSignals(0, 'reviewKlineChart')
+        }, delay)
+      })
+    },
+    toggleReviewVolume () {
+      this.preserveReviewChartViewport()
+      this.reviewShowVolume = !this.reviewShowVolume
+      this.$nextTick(() => {
+        this.refreshReviewBacktestOverlays()
+      })
+    },
+    toggleReviewEquity () {
+      this.preserveReviewChartViewport()
+      this.reviewShowEquity = !this.reviewShowEquity
+      this.$nextTick(() => {
+        this.refreshReviewBacktestOverlays()
+      })
+    },
+    handleReviewIndicatorToggle ({ action, indicator }) {
+      if (!indicator || (!indicator.id && !indicator.instanceId)) return
+      const targetInstanceId = indicator.instanceId || indicator.id
+      if (action === 'add') {
+        this.reviewIndicators = [...this.reviewIndicators, { ...indicator, instanceId: targetInstanceId, calculate: null }]
+      } else if (action === 'update') {
+        this.reviewIndicators = this.reviewIndicators.map(item => {
+          if ((item.instanceId || item.id) !== targetInstanceId) return item
+          return {
+            ...item,
+            ...indicator,
+            instanceId: targetInstanceId,
+            params: indicator.params && typeof indicator.params === 'object' ? { ...indicator.params } : (item.params || {}),
+            style: indicator.style && typeof indicator.style === 'object'
+              ? { color: indicator.style.color || '', lineWidth: Number(indicator.style.lineWidth || 2) }
+              : (item.style || { color: '', lineWidth: 2 }),
+            calculate: null
+          }
+        })
+      } else if (action === 'remove') {
+        this.reviewIndicators = this.reviewIndicators.filter(item => (item.instanceId || item.id) !== targetInstanceId)
+      }
+    },
 
     openEquityZoom () {
       this.equityZoomVisible = true
@@ -6668,6 +6748,9 @@ export default {
       this.reviewTradesExpanded = false
       this.reviewOutputPlotDropdownVisible = false
       this.reviewOutputPlotVisibility = {}
+      this.reviewIndicators = []
+      this.reviewShowVolume = true
+      this.reviewShowEquity = true
       this.$nextTick(() => {
         ;[120, 350, 700].forEach(delay => {
           setTimeout(() => {
@@ -6689,6 +6772,9 @@ export default {
       this.reviewTradesExpanded = false
       this.reviewOutputPlotDropdownVisible = false
       this.reviewOutputPlotVisibility = {}
+      this.reviewIndicators = []
+      this.reviewShowVolume = true
+      this.reviewShowEquity = true
       this.clearBacktestSignalOverlays({ silent: true, refName: 'reviewKlineChart' })
     },
 
@@ -6764,10 +6850,14 @@ export default {
     },
 
     toggleReviewTrades () {
+      this.preserveReviewChartViewport()
       this.reviewTradesExpanded = !this.reviewTradesExpanded
       this.$nextTick(() => {
         const chart = this.$refs.reviewKlineChart
         if (chart && typeof chart.handleResize === 'function') chart.handleResize()
+        if (chart && typeof chart.syncReviewLayoutForPanelChange === 'function') {
+          chart.syncReviewLayoutForPanelChange()
+        }
       })
     },
 
@@ -8626,7 +8716,7 @@ body.realdark .backtest-panel-toolbar {
 }
 .result-split-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 1fr);
+  grid-template-columns: 1fr;
   gap: 14px;
   align-items: start;
 }
@@ -8643,8 +8733,7 @@ body.realdark .backtest-panel-toolbar {
   padding: 14px 16px 16px;
 }
 .result-split-panel--optimizer {
-  position: sticky;
-  top: 12px;
+  position: static;
 }
 .result-split-panel--optimizer .experiment-panel,
 .result-split-panel--optimizer .ide-tuning-launch {
@@ -8757,21 +8846,29 @@ body.realdark .backtest-panel-toolbar {
   color: #64748b;
 }
 .backtest-checklist {
-  padding: 10px 12px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 8px;
   background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  overflow: hidden;
 }
 .backtest-checklist__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 28px;
-  font-size: 12px;
+  min-height: 46px;
+  padding: 10px 16px;
+  font-size: 13px;
   font-weight: 700;
-  color: #475569;
+  color: #1e293b;
   cursor: pointer;
+  user-select: none;
+  background: linear-gradient(135deg, var(--primary-color-soft, rgba(24, 144, 255, 0.08)) 0%, color-mix(in srgb, var(--primary-color, @primary-color) 4%, #fff) 100%);
+  border-bottom: 1px solid var(--primary-color-ring, rgba(15, 23, 42, 0.08));
+  transition: background 0.15s;
+  &:hover {
+    background: linear-gradient(135deg, var(--primary-color-soft-strong, rgba(24, 144, 255, 0.12)) 0%, color-mix(in srgb, var(--primary-color, @primary-color) 6%, #fff) 100%);
+  }
   &:focus-visible {
     outline: 2px solid rgba(24, 144, 255, 0.45);
     outline-offset: 2px;
@@ -8780,23 +8877,36 @@ body.realdark .backtest-panel-toolbar {
 .backtest-checklist__title {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  .anticon {
+    color: var(--primary-color, @primary-color);
+    font-size: 15px;
+  }
 }
 .backtest-checklist__toggle-icon {
   font-size: 11px;
-  color: #94a3b8;
+  color: rgba(0, 0, 0, 0.4);
+}
+.backtest-checklist__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+  min-width: 0;
 }
 .backtest-checklist__summary {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
-.backtest-checklist:not(.is-collapsed) .backtest-checklist__head {
-  margin-bottom: 8px;
+.backtest-checklist.is-collapsed .backtest-checklist__head {
+  border-bottom: none;
 }
 .backtest-checklist__list {
   display: grid;
   gap: 6px;
+  padding: 10px 12px;
 }
 .backtest-checklist__item {
   display: flex;
@@ -9100,30 +9210,35 @@ body.realdark .backtest-panel-toolbar {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #0f172a;
-  color: #e2e8f0;
+  background: #141414;
+  color: rgba(255, 255, 255, 0.82);
 }
 .backtest-review__toolbar {
-  height: 64px;
+  height: 58px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 10px 16px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.96));
+  padding: 9px 14px;
+  border-bottom: 1px solid #303030;
+  background: linear-gradient(135deg, rgba(24, 144, 255, 0.10) 0%, rgba(31, 31, 31, 0.98) 100%);
 }
 .backtest-review__kicker {
-  font-size: 12px;
-  color: #94a3b8;
+  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary-color, #1890ff);
 }
 .backtest-review__title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
-  color: #f8fafc;
+  color: rgba(255, 255, 255, 0.9);
+  .anticon {
+    color: var(--primary-color, #1890ff);
+  }
 }
 .backtest-review__actions {
   display: flex;
@@ -9132,10 +9247,41 @@ body.realdark .backtest-panel-toolbar {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+.backtest-review__actions ::v-deep .ant-btn {
+  height: 28px;
+  border-radius: 6px;
+  border-color: rgba(255, 255, 255, 0.10);
+  background: #1f1f1f;
+  color: rgba(255, 255, 255, 0.78);
+  box-shadow: none;
+  &:hover,
+  &:focus {
+    border-color: var(--primary-color, #1890ff);
+    color: var(--primary-color, #1890ff);
+  }
+  &[disabled] {
+    color: rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+}
+.backtest-review__actions ::v-deep .ant-btn-primary {
+  color: #fff;
+  background: var(--primary-color, #1890ff);
+  border-color: var(--primary-color, #1890ff);
+}
 .backtest-review__plot-menu .ant-dropdown-menu-item {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.backtest-review__plot-name {
+  display: inline-block;
+  max-width: 220px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .backtest-review__content {
   position: relative;
@@ -9148,21 +9294,29 @@ body.realdark .backtest-panel-toolbar {
     "trades";
 }
 .backtest-review__content.is-trades-collapsed {
-  grid-template-rows: minmax(0, 1fr) 44px;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "price";
 }
 .backtest-review__price-pane {
   grid-area: price;
   min-height: 180px;
   overflow: hidden;
+  background: #141414;
 }
 .backtest-review__price-pane ::v-deep .chart-left,
 .backtest-review__price-pane ::v-deep .chart-wrapper,
-.backtest-review__price-pane ::v-deep .chart-content-area,
-.backtest-review__price-pane ::v-deep .kline-chart-container {
+.backtest-review__price-pane ::v-deep .chart-content-area {
   width: 100% !important;
   height: 100% !important;
   min-width: 0 !important;
   min-height: 0 !important;
+}
+.backtest-review__price-pane ::v-deep .kline-chart-container {
+  width: 100% !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  flex: 1 1 0 !important;
 }
 .backtest-review__price-pane ::v-deep .chart-left {
   flex: 1 1 100% !important;
@@ -9172,47 +9326,42 @@ body.realdark .backtest-panel-toolbar {
   grid-area: trades;
   min-height: 0;
   padding: 8px 14px 10px;
-  border-top: 1px solid rgba(148, 163, 184, 0.22);
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(30, 41, 59, 0.92));
+  border-top: 1px solid #303030;
+  background: #1f1f1f;
   overflow: hidden;
-  color: #cbd5e1;
-}
-.backtest-review__trades.is-collapsed {
-  padding: 8px 16px;
+  color: rgba(255, 255, 255, 0.72);
 }
 .backtest-review__trades .trades-title {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   min-height: 22px;
   margin-bottom: 6px;
-  color: #e2e8f0;
-}
-.backtest-review__trades.is-collapsed .trades-title {
-  margin-bottom: 0;
+  color: rgba(255, 255, 255, 0.88);
+  .anticon {
+    color: var(--primary-color, #1890ff);
+  }
 }
 .backtest-review__trades-hint {
   margin-left: 12px;
   font-size: 12px;
   font-weight: 400;
-  color: #94a3b8;
-}
-.backtest-review__trades-toggle {
-  margin-left: auto;
-  padding-right: 0;
+  color: rgba(255, 255, 255, 0.45);
 }
 .backtest-review__trades-scroll {
   max-height: 150px;
   overflow-x: auto;
   overflow-y: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 6px;
+  border: 1px solid #303030;
+  border-radius: 8px;
+  background: #181818;
 }
 .backtest-review__trades-scroll::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 .backtest-review__trades-scroll::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.36);
+  background: #434343;
   border-radius: 999px;
 }
 .review-trades-table {
@@ -9228,8 +9377,8 @@ body.realdark .backtest-panel-toolbar {
   top: 0;
   z-index: 2;
   height: 32px;
-  background: rgba(30, 41, 59, 0.98);
-  color: #cbd5e1;
+  background: #262626;
+  color: rgba(255, 255, 255, 0.68);
   font-size: 13px;
   font-weight: 600;
   line-height: 20px;
@@ -9241,12 +9390,17 @@ body.realdark .backtest-panel-toolbar {
 }
 .review-trades-table__row {
   height: 36px;
-  color: #cbd5e1;
+  color: rgba(255, 255, 255, 0.74);
   font-size: 13px;
   line-height: 22px;
   cursor: pointer;
-  background: rgba(15, 23, 42, 0.82);
-  border-top: 1px solid rgba(148, 163, 184, 0.10);
+  background: #1a1a1a;
+  border-top: 1px solid #303030;
+  transition: background 0.16s ease, color 0.16s ease;
+  &:hover {
+    background: #222;
+    color: rgba(255, 255, 255, 0.88);
+  }
 }
 .review-trades-table__header > div,
 .review-trades-table__row > div {
@@ -9276,10 +9430,10 @@ body.realdark .backtest-panel-toolbar {
   right: 3px;
   bottom: 0;
   width: 1px;
-  background: rgba(148, 163, 184, 0.34);
+  background: rgba(255, 255, 255, 0.18);
 }
 .review-trades-table__resize-handle:hover::after {
-  background: rgba(96, 165, 250, 0.82);
+  background: var(--primary-color, #1890ff);
 }
 .review-trades-table ::v-deep .ant-tag {
   min-height: 22px;
@@ -9288,7 +9442,8 @@ body.realdark .backtest-panel-toolbar {
   line-height: 20px;
 }
 .review-trades-table__row.backtest-review__trade-row--active {
-  background: rgba(37, 99, 235, 0.24);
+  background: var(--primary-color-soft, rgba(24, 144, 255, 0.14));
+  box-shadow: inset 3px 0 0 var(--primary-color, #1890ff);
 }
 
 .ide-tuning-launch {
@@ -10776,6 +10931,7 @@ body.realdark .backtest-panel-toolbar {
   .result-split-panel,
   .backtest-overview-head,
   .eq-section--hero,
+  .backtest-checklist,
   .backtest-quality-strip,
   .backtest-quality-chip,
   .benchmark-summary-card,
@@ -10822,7 +10978,8 @@ body.realdark .backtest-panel-toolbar {
     box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
   }
   .params-card-header,
-  .workbench-panel-header {
+  .workbench-panel-header,
+  .backtest-checklist__head {
     background: linear-gradient(135deg, var(--primary-color-soft, rgba(24, 144, 255, 0.12)) 0%, color-mix(in srgb, var(--primary-color, #1890ff) 4%, transparent) 100%);
     border-bottom-color: #303030;
     &:hover {
@@ -10833,12 +10990,19 @@ body.realdark .backtest-panel-toolbar {
     background: linear-gradient(135deg, var(--primary-color-soft, rgba(24, 144, 255, 0.12)) 0%, color-mix(in srgb, var(--primary-color, #1890ff) 4%, transparent) 100%);
   }
   .params-card-title,
-  .workbench-panel-title {
+  .workbench-panel-title,
+  .backtest-checklist__title {
     color: rgba(255,255,255,0.88);
     .anticon,
     ::v-deep .anticon {
       color: var(--primary-color, #1890ff);
     }
+  }
+  .backtest-checklist.is-collapsed .backtest-checklist__head {
+    border-bottom-color: transparent;
+  }
+  .backtest-checklist__toggle-icon {
+    color: rgba(255, 255, 255, 0.45);
   }
   .workbench-panel-meta { color: rgba(255, 255, 255, 0.45); }
   .workbench-panel-body { background: #1a1a1a; }
@@ -11625,16 +11789,30 @@ body.dark .ide-drawer-wrap--dark .ant-drawer-close {
   height: 100vh;
   border-radius: 0;
   overflow: hidden;
+  background: #141414;
 }
 .ant-modal-wrap.backtest-review-modal .ant-modal-body {
   height: 100vh;
+  background: #141414;
+}
+.ant-modal-wrap.backtest-review-modal .backtest-review__plot-menu {
+  background: #1f1f1f;
+  border: 1px solid #303030;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
+}
+.ant-modal-wrap.backtest-review-modal .backtest-review__plot-menu .ant-dropdown-menu-item {
+  color: rgba(255, 255, 255, 0.76);
+}
+.ant-modal-wrap.backtest-review-modal .backtest-review__plot-menu .ant-dropdown-menu-item:hover {
+  background: var(--primary-color-soft, rgba(24, 144, 255, 0.12));
+  color: rgba(255, 255, 255, 0.9);
 }
 body.review-trades-resizing {
   cursor: col-resize;
   user-select: none;
 }
 body.review-trades-resizing .review-trades-table__resize-handle::after {
-  background: rgba(96, 165, 250, 0.82);
+  background: var(--primary-color, #1890ff);
 }
 .ant-select-dropdown.profile-exchange-select-dropdown,
 .ant-select-dropdown.profile-exchange-select-dropdown-dark {

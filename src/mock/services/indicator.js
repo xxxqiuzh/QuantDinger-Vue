@@ -34,9 +34,9 @@ const previewIndicators = [
       'output = {',
       "  'name': my_indicator_name,",
       "  'plots': [",
-      "    {'name': 'Preview MA12', 'data': fast_ma.where(fast_ma.notna(), None).tolist(), 'color': '#22c55e', 'overlay': True},",
-      "    {'name': 'Preview MA36', 'data': slow_ma.where(slow_ma.notna(), None).tolist(), 'color': '#f59e0b', 'overlay': True},",
-      "    {'name': 'Preview Range Stop', 'data': range_stop.where(range_stop.notna(), None).tolist(), 'color': '#60a5fa', 'overlay': True},",
+      "    {'name': 'MA12', 'data': fast_ma.where(fast_ma.notna(), None).tolist(), 'color': '#22c55e', 'overlay': True},",
+      "    {'name': 'MA36', 'data': slow_ma.where(slow_ma.notna(), None).tolist(), 'color': '#f59e0b', 'overlay': True},",
+      "    {'name': 'Range Stop', 'data': range_stop.where(range_stop.notna(), None).tolist(), 'color': '#60a5fa', 'overlay': True},",
       '  ],',
       "  'signals': [],",
       '}'
@@ -163,19 +163,19 @@ function rollingAverage (values, period) {
 
 const previewPlots = [
   {
-    name: 'Preview MA12',
+    name: 'MA12',
     data: rollingAverage(klineData.map(bar => bar.close), 12),
     color: '#22c55e',
     overlay: true
   },
   {
-    name: 'Preview MA36',
+    name: 'MA36',
     data: rollingAverage(klineData.map(bar => bar.close), 36),
     color: '#f59e0b',
     overlay: true
   },
   {
-    name: 'Preview Range Stop',
+    name: 'Range Stop',
     data: rollingAverage(klineData.map(bar => bar.high - bar.low), 14).map((range, index) => {
       if (range == null) return null
       return Number((klineData[index].close - range).toFixed(2))

@@ -24,7 +24,7 @@
         </a-tooltip>
       </div>
       <div class="chart-content-area">
-        <div v-if="!isReviewMode" class="indicator-toolbar">
+        <div v-if="!isReviewMode || reviewEnableIndicatorControls" class="indicator-toolbar">
           <div
             v-for="indicator in indicatorButtons"
             :key="indicator.id"
@@ -36,7 +36,7 @@
             {{ indicator.shortName }}
           </div>
         </div>
-        <div v-if="!isReviewMode && activePresetIndicators.length" class="indicator-active-bar">
+        <div v-if="(!isReviewMode || reviewEnableIndicatorControls) && activePresetIndicators.length" class="indicator-active-bar">
           <div
             v-for="indicator in activePresetIndicators"
             :key="indicator.instanceId || indicator.id"
@@ -230,6 +230,18 @@ export default {
     reviewHideIndicatorSignals: {
       type: Boolean,
       default: false
+    },
+    reviewShowVolume: {
+      type: Boolean,
+      default: true
+    },
+    reviewShowEquity: {
+      type: Boolean,
+      default: true
+    },
+    reviewEnableIndicatorControls: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['retry', 'price-change', 'load', 'crosshair-change', 'indicator-toggle', 'indicators-updated'],
@@ -258,6 +270,10 @@ export default {
     const REVIEW_BENCHMARK_FIELD = '__qdReviewBenchmark'
     let reviewEquityPaneId = null
     let reviewEquityEnsureRafId = null
+    let reviewLayoutResizeTimers = []
+    let reviewVisibleRangeTimers = []
+    let reviewPaneLayoutRafId = null
+    let pendingReviewVisibleRange = null
     let pinnedCrosshairOverlayIds = []
     let reviewTradeRangeOverlayId = null
     const pinnedCrosshairDataIndex = ref(null)
@@ -270,8 +286,160 @@ export default {
         (Array.isArray(props.reviewEquityCurve) && props.reviewEquityCurve.length > 0) ||
         (Array.isArray(props.reviewBenchmarkCurve) && props.reviewBenchmarkCurve.length > 0)
     })
+    const resizeChartSafely = () => {
+      try {
+        if (chartRef.value && typeof chartRef.value.resize === 'function') {
+          chartRef.value.resize()
+        }
+      } catch (e) {
+      }
+    }
+    const scheduleReviewLayoutResize = () => {
+      reviewLayoutResizeTimers.forEach(timer => clearTimeout(timer))
+      reviewLayoutResizeTimers = []
+      nextTick(() => {
+        ;[0, 80, 180].forEach(delay => {
+          const timer = setTimeout(() => {
+            resizeChartSafely()
+          }, delay)
+          reviewLayoutResizeTimers.push(timer)
+        })
+      })
+    }
+    const getVisibleRangeSafely = () => {
+      try {
+        if (chartRef.value && typeof chartRef.value.getVisibleRange === 'function') {
+          const range = chartRef.value.getVisibleRange()
+          if (range && Number.isFinite(Number(range.from)) && Number.isFinite(Number(range.to))) {
+            const from = Number.isFinite(Number(range.realFrom)) ? Number(range.realFrom) : Number(range.from)
+            const to = Number.isFinite(Number(range.realTo)) ? Number(range.realTo) : Number(range.to)
+            const leftIndex = Math.max(0, Math.floor(from))
+            const leftData = klineData.value[leftIndex]
+            return {
+              from,
+              to,
+              leftIndex,
+              leftTimestamp: leftData && Number.isFinite(Number(leftData.timestamp)) ? Number(leftData.timestamp) : null
+            }
+          }
+        }
+      } catch (e) {
+      }
+      return null
+    }
+    const findKlineIndexByTimestamp = (timestamp) => {
+      if (!Number.isFinite(Number(timestamp))) return -1
+      return klineData.value.findIndex(item => Number(item && item.timestamp) === Number(timestamp))
+    }
+    const restoreVisibleRangeSafely = (range) => {
+      if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return
+      try {
+        const leftIndex = findKlineIndexByTimestamp(range.leftTimestamp)
+        const targetLeftIndex = leftIndex >= 0 ? leftIndex : range.leftIndex
+        if (!Number.isFinite(targetLeftIndex) || targetLeftIndex < 0) return
+
+        const currentRange = getVisibleRangeSafely()
+        if (currentRange && chartRef.value && typeof chartRef.value.scrollByDistance === 'function' && typeof chartRef.value.getBarSpace === 'function') {
+          const currentLeftIndex = Math.max(0, Math.floor(currentRange.from))
+          const barSpace = Number(chartRef.value.getBarSpace())
+          if (Number.isFinite(barSpace) && barSpace > 0) {
+            const distance = (currentLeftIndex - targetLeftIndex) * barSpace
+            if (Math.abs(distance) > 0.5) {
+              chartRef.value.scrollByDistance(distance, 0)
+            }
+            return
+          }
+        }
+
+        if (chartRef.value && typeof chartRef.value.scrollToDataIndex === 'function') {
+          const visibleCount = Math.max(1, Math.round(range.to - range.from))
+          chartRef.value.scrollToDataIndex(Math.max(0, targetLeftIndex + visibleCount - 2), 0)
+        } else if (chartRef.value && typeof chartRef.value.setVisibleRange === 'function') {
+          chartRef.value.setVisibleRange(range.from, range.to)
+        }
+      } catch (e) {
+      }
+    }
+    const scheduleRestoreVisibleRange = (range) => {
+      if (!range) return
+      reviewVisibleRangeTimers.forEach(timer => clearTimeout(timer))
+      reviewVisibleRangeTimers = []
+      nextTick(() => {
+        ;[0, 120, 260].forEach((delay, index, delays) => {
+          const timer = setTimeout(() => {
+            restoreVisibleRangeSafely(range)
+            _ensureWmLayer()
+            if (index === delays.length - 1) pendingReviewVisibleRange = null
+          }, delay)
+          reviewVisibleRangeTimers.push(timer)
+        })
+      })
+    }
+    const captureReviewVisibleRange = () => {
+      if (!pendingReviewVisibleRange) {
+        pendingReviewVisibleRange = getVisibleRangeSafely()
+      }
+      return pendingReviewVisibleRange
+    }
+    const scheduleReviewPaneLayoutSync = (options = {}) => {
+      const savedVisibleRange = captureReviewVisibleRange()
+      if (reviewPaneLayoutRafId != null) cancelAnimationFrame(reviewPaneLayoutRafId)
+      reviewPaneLayoutRafId = requestAnimationFrame(() => {
+        reviewPaneLayoutRafId = null
+        nextTick(() => {
+          if (!chartRef.value) return
+          const refreshEquityData = options.refreshEquityData === true
+          if (refreshEquityData) {
+            syncReviewEquityValues()
+            if (klineData.value.length > 0 && typeof chartRef.value.applyNewData === 'function') {
+              chartRef.value.applyNewData(klineData.value)
+            }
+          }
+          if (options.recreateChart === true) {
+            initChart()
+            scheduleRestoreVisibleRange(savedVisibleRange)
+          } else {
+            syncVolumePaneLayout()
+            syncReviewEquityPane(options.forceEquity === true)
+            resizeChartSafely()
+            scheduleRestoreVisibleRange(savedVisibleRange)
+          }
+          nextTick(() => _ensureWmLayer())
+        })
+      })
+    }
+    const preserveReviewViewportForLayoutChange = () => {
+      captureReviewVisibleRange()
+    }
+    const syncReviewLayoutForPanelChange = () => {
+      scheduleReviewPaneLayoutSync()
+    }
+    const clearVolumePane = () => {
+      if (!chartRef.value || !volPaneEnsured) {
+        volPaneEnsured = false
+        volPaneId = null
+        return
+      }
+      try {
+        if (typeof chartRef.value.removeIndicator === 'function') {
+          if (volPaneId) {
+            chartRef.value.removeIndicator(volPaneId, 'VOL')
+          } else {
+            chartRef.value.removeIndicator('VOL')
+          }
+        }
+      } catch (e) {
+      }
+      volPaneEnsured = false
+      volPaneId = null
+      scheduleReviewLayoutResize()
+    }
     const syncVolumePaneLayout = () => {
       if (!chartRef.value) return
+      if (!props.reviewShowVolume) {
+        clearVolumePane()
+        return
+      }
       if (!volPaneEnsured && typeof chartRef.value.createIndicator === 'function') {
         try {
           volPaneId = chartRef.value.createIndicator('VOL', false, VOL_PANE_OPTIONS) || volPaneId
@@ -285,6 +453,7 @@ export default {
         }
       } catch (e) {
       }
+      scheduleReviewLayoutResize()
     }
     const scheduleSyncVolumePaneLayout = () => {
       if (volEnsureRafId != null) cancelAnimationFrame(volEnsureRafId)
@@ -375,7 +544,7 @@ export default {
     const syncReviewEquityValues = () => {
       const equitySeries = buildReviewSeries(props.reviewEquityCurve)
       const benchmarkSeries = buildReviewSeries(props.reviewBenchmarkCurve)
-      const hasReviewSeries = equitySeries.length > 0 || benchmarkSeries.length > 0
+      const hasReviewSeries = props.reviewShowEquity && (equitySeries.length > 0 || benchmarkSeries.length > 0)
       klineData.value.forEach(item => {
         if (!item) return
         if (!hasReviewSeries) {
@@ -2973,7 +3142,7 @@ registerOverlay({
       if (chartRef.value) {
         setTimeout(() => {
           if (chartRef.value) {
-            chartRef.value.resize()
+            resizeChartSafely()
           }
         }, 100)
       } else {
@@ -3205,12 +3374,13 @@ registerOverlay({
       } catch (e) {
       }
       reviewEquityPaneId = null
+      scheduleReviewLayoutResize()
     }
 
     const syncReviewEquityPane = (force = false) => {
       if (!chartRef.value) return
       const hasEquity = Array.isArray(props.reviewEquityCurve) && props.reviewEquityCurve.length > 0
-      if (!hasEquity) {
+      if (!props.reviewShowEquity || !hasEquity) {
         clearReviewEquityPane()
         return
       }
@@ -3228,6 +3398,7 @@ registerOverlay({
         )
       } catch (e) {
       }
+      scheduleReviewLayoutResize()
     }
 
     const scheduleSyncReviewEquityPane = (force = false) => {
@@ -4617,13 +4788,21 @@ registerOverlay({
 
     watch(() => [props.reviewEquityCurve, props.reviewBenchmarkCurve], () => {
       if (chartRef.value && klineData.value.length > 0) {
-        nextTick(() => {
-          syncReviewEquityValues()
-          if (typeof chartRef.value.applyNewData === 'function') chartRef.value.applyNewData(klineData.value)
-          scheduleSyncReviewEquityPane(true)
-        })
+        scheduleReviewPaneLayoutSync({ refreshEquityData: true, forceEquity: true })
       }
     }, { deep: true })
+
+    watch(() => props.reviewShowVolume, () => {
+      if (chartRef.value) {
+        scheduleReviewPaneLayoutSync({ recreateChart: true })
+      }
+    })
+
+    watch(() => props.reviewShowEquity, () => {
+      if (chartRef.value && klineData.value.length > 0) {
+        scheduleReviewPaneLayoutSync({ refreshEquityData: true, forceEquity: true, recreateChart: true })
+      }
+    })
 
     watch(() => props.realtimeEnabled, (newVal) => {
       if (newVal) {
@@ -4659,7 +4838,7 @@ registerOverlay({
           chartResizeRafId = requestAnimationFrame(() => {
             chartResizeRafId = null
             if (chartRef.value && typeof chartRef.value.resize === 'function') {
-              chartRef.value.resize()
+              resizeChartSafely()
               scheduleSyncVolumePaneLayout()
               scheduleSyncReviewEquityPane()
             } else {
@@ -4693,12 +4872,17 @@ registerOverlay({
       const h = parent.clientHeight
       if (w === 0 || h === 0) return
       const dpr = window.devicePixelRatio || 1
-      cvs.width = w * dpr
-      cvs.height = h * dpr
+      const canvasWidth = Math.round(w * dpr)
+      const canvasHeight = Math.round(h * dpr)
+      cvs.width = 0
+      cvs.height = 0
+      cvs.width = canvasWidth
+      cvs.height = canvasHeight
       cvs.style.width = w + 'px'
       cvs.style.height = h + 'px'
       const ctx = cvs.getContext('2d')
       if (!ctx) return
+      if (typeof ctx.setTransform === 'function') ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.clearRect(0, 0, cvs.width, cvs.height)
       ctx.save()
       ctx.scale(dpr, dpr)
@@ -4771,6 +4955,15 @@ registerOverlay({
         cancelAnimationFrame(reviewEquityEnsureRafId)
         reviewEquityEnsureRafId = null
       }
+      if (reviewPaneLayoutRafId != null) {
+        cancelAnimationFrame(reviewPaneLayoutRafId)
+        reviewPaneLayoutRafId = null
+      }
+      reviewLayoutResizeTimers.forEach(timer => clearTimeout(timer))
+      reviewLayoutResizeTimers = []
+      reviewVisibleRangeTimers.forEach(timer => clearTimeout(timer))
+      reviewVisibleRangeTimers = []
+      pendingReviewVisibleRange = null
       if (chartResizeObserver) {
         chartResizeObserver.disconnect()
         chartResizeObserver = null
@@ -4862,6 +5055,8 @@ registerOverlay({
       pinCrosshairByDataIndex,
       clearReviewTradeRange,
       highlightReviewTradeRange,
+      preserveReviewViewportForLayoutChange,
+      syncReviewLayoutForPanelChange,
       scrollToDataIndexWithRightSpace,
       scrollToDataIndex,
       clearBacktestOverlays,
